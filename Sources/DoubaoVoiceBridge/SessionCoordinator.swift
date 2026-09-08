@@ -28,22 +28,22 @@ final class SessionCoordinator {
     init() {
         panel.onCommit = { [weak self] text in self?.send(text: text) }
         panel.onCancel = { [weak self] in self?.cancel() }
-        panel.onControlReleased = { [weak self] in self?.controlReleased() }
+        panel.onFnReleased = { [weak self] in self?.fnReleased() }
         panel.onTranscriptTimeout = { [weak self] in self?.handleTranscriptTimeout() }
     }
 
     func begin(target: UURemoteTarget) {
         guard (state == .idle || state == .failed), !deliveryAwaitingCleanup else {
-            onStatusChange?("正在恢复剪贴板，请稍候…", false)
+            onStatusChange?("正在完成上一条输入，请稍候…", false)
             return
         }
         self.target = target
         state = .listening
-        panel.begin(targetDescription: "发送到 Mac mini · UU 远控")
-        onStatusChange?("正在听写…松开左 ⌃ 自动发送", false)
+        panel.begin(targetDescription: "发送到原 UU 远控窗口")
+        onStatusChange?("正在听写…松开Fn 自动发送", false)
     }
 
-    func controlReleased() {
+    func fnReleased() {
         guard state == .listening else { return }
         state = .finalizing
         panel.waitForFinalTranscript()
@@ -57,12 +57,12 @@ final class SessionCoordinator {
         state = .idle
         panel.hide()
         target?.activateOriginalWindow()
-        onStatusChange?("就绪 · 在 UU 远控中长按左 ⌃", false)
+        onStatusChange?("就绪 · 在 UU 远控中长按Fn", false)
     }
 
     func prepareForTermination() {
         ClipboardKeyboardPaster.finishPendingEventsBeforeTermination()
-        delivery.restoreClipboardForTermination()
+        delivery.cancelForTermination()
     }
 
     private func send(text: String) {
@@ -82,7 +82,7 @@ final class SessionCoordinator {
                 switch result {
                 case .success:
                     self.target = nil
-                    self.onStatusChange?("已向 Mac mini 发送自动粘贴指令", false)
+                    self.onStatusChange?("已向 UU 发送自动粘贴指令", false)
                 case .failure(let error):
                     self.deliveryAwaitingCleanup = false
                     self.state = .failed
@@ -96,7 +96,7 @@ final class SessionCoordinator {
                 self.deliveryAwaitingCleanup = false
                 if self.state == .delivering {
                     self.state = .idle
-                    self.onStatusChange?("就绪 · 在 UU 远控中长按左 ⌃", false)
+                    self.onStatusChange?("就绪 · 在 UU 远控中长按Fn", false)
                 }
             }
         )
