@@ -36,6 +36,7 @@ enum Diagnostics {
         if let probeTap { CFMachPortInvalidate(probeTap) }
 
         let values: [(String, String)] = [
+            ("trigger", "Fn"),
             ("bundle", Bundle.main.bundleIdentifier ?? "unknown"),
             ("version", Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"),
             ("accessibility", AXIsProcessTrusted() ? "granted" : "missing"),

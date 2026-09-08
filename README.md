@@ -1,3 +1,8 @@
+> **草稿实验分支：Fn 触发与 2026-09-08 实机修复参考。**
+> 本分支使用 Fn，并改变应用标识与剪贴板恢复行为；“偶尔粘贴旧内容”仍未解决。
+> 请使用 `zsh scripts/build-fn-app.sh` 构建，先阅读 [Fn 分支说明](FN-VARIANT.md) 和 [实机问题记录](docs/2026-09-08-fn-field-report.md)。
+> 下方保留上游左 Control 版本的原始说明作为背景，不能直接作为本实验分支的使用说明。
+
 # DoubaoVoiceBridge（远控听写）
 
 一个轻量的 macOS 菜单栏工具：在 MacBook 上按住左 `Control` 使用豆包语音输入法听写，松开后自动把文字通过 UU 远控粘贴到远端 Mac 的当前输入框。

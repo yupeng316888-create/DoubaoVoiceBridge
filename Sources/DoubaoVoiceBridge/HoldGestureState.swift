@@ -8,8 +8,8 @@ enum HoldGesturePhase: Equatable {
 }
 
 enum HoldGestureInput {
-    case controlDown(targetAvailable: Bool)
-    case controlUp
+    case fnDown(targetAvailable: Bool)
+    case fnUp
     case otherInput
     case thresholdReached
 }
@@ -18,7 +18,7 @@ enum HoldGestureEffect: Equatable {
     case suppress
     case passThrough
     case scheduleThreshold
-    case synthesizeControlDown
+    case synthesizeFnDown
     case beginDictation
     case finishDictation
 }
@@ -32,7 +32,7 @@ struct HoldGestureState {
 
     mutating func handle(_ input: HoldGestureInput) -> [HoldGestureEffect] {
         switch (phase, input) {
-        case (.idle, .controlDown(let targetAvailable)):
+        case (.idle, .fnDown(let targetAvailable)):
             guard targetAvailable else { return [.passThrough] }
             phase = .pending
             return [.suppress, .scheduleThreshold]
@@ -43,25 +43,25 @@ struct HoldGestureState {
 
         case (.pending, .otherInput):
             phase = .passthrough
-            return [.synthesizeControlDown, .passThrough]
+            return [.synthesizeFnDown, .passThrough]
 
-        case (.pending, .controlUp):
+        case (.pending, .fnUp):
             phase = .idle
-            return [.suppress]
+            return [.synthesizeFnDown, .passThrough]
 
-        case (.dictating, .controlUp):
+        case (.dictating, .fnUp):
             return [.suppress, .finishDictation]
 
-        case (.passthrough, .controlUp):
+        case (.passthrough, .fnUp):
             phase = .idle
             return [.passThrough]
 
         case (.dictating, .otherInput), (.passthrough, .otherInput), (.idle, .otherInput):
             return [.passThrough]
 
-        case (.idle, .controlUp), (.idle, .thresholdReached),
-             (.pending, .controlDown), (.dictating, .controlDown),
-             (.dictating, .thresholdReached), (.passthrough, .controlDown),
+        case (.idle, .fnUp), (.idle, .thresholdReached),
+             (.pending, .fnDown), (.dictating, .fnDown),
+             (.dictating, .thresholdReached), (.passthrough, .fnDown),
              (.passthrough, .thresholdReached):
             return phase == .dictating ? [.suppress] : [.passThrough]
         }

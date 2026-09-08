@@ -3,33 +3,24 @@ import ApplicationServices
 import os.log
 
 enum DeliveryError: LocalizedError, Equatable {
-    case emptyText
-    case accessibilityMissing
-    case targetAppMissing
-    case clipboardSnapshotUnavailable
-    case pasteboardUnavailable
-    case targetChanged
-    case keyboardEventFailed
-    case modifierKeysActive
+    case emptyText, accessibilityMissing, targetAppMissing, pasteboardUnavailable
+    case targetChanged, originalWindowUnavailable, focusTimedOut
+    case clipboardChanged, clipboardTimedOut, keyboardEventFailed, modifierKeysActive, deliveryBusy
 
     var errorDescription: String? {
         switch self {
-        case .emptyText:
-            return "没有可发送的文字"
-        case .accessibilityMissing:
-            return "尚未开启辅助功能权限"
-        case .targetAppMissing:
-            return "UU 远控已经关闭"
-        case .clipboardSnapshotUnavailable:
-            return "原剪贴板内容过大或无法安全备份"
-        case .pasteboardUnavailable:
-            return "无法写入系统剪贴板"
-        case .targetChanged:
-            return "发送前焦点发生变化，已取消自动粘贴"
-        case .keyboardEventFailed:
-            return "无法发送 Command-V"
-        case .modifierKeysActive:
-            return "请先松开 Command、Shift、Option 或 Control 键"
+        case .emptyText: return "没有可发送的文字"
+        case .accessibilityMissing: return "尚未开启辅助功能权限"
+        case .targetAppMissing: return "UU 远控已经关闭"
+        case .pasteboardUnavailable: return "无法写入系统剪贴板"
+        case .targetChanged: return "已切换到其他应用或窗口，已取消自动粘贴"
+        case .originalWindowUnavailable: return "没有记录到原来的 UU 窗口，请返回远控窗口后重试"
+        case .focusTimedOut: return "UU 原窗口未能及时就绪，已保留文字"
+        case .clipboardChanged: return "剪贴板内容或格式在同步期间发生变化，已取消自动粘贴"
+        case .clipboardTimedOut: return "剪贴板同步未能及时稳定，已保留文字"
+        case .keyboardEventFailed: return "无法发送 Command-V"
+        case .modifierKeysActive: return "请先松开 Fn、Command、Shift、Option 或 Control 键"
+        case .deliveryBusy: return "正在完成上一条输入，请稍候"
         }
     }
 }
@@ -39,11 +30,9 @@ final class UURemoteDelivery {
     static let minimumPasteDelay: TimeInterval = 0.45
     static let maximumPasteDelay: TimeInterval = 3.0
 
-    private let pasteboard = NSPasteboard.general
-    private let logger = Logger(subsystem: "com.lyp.DoubaoVoiceBridge", category: "delivery")
-    private var activeSnapshot: PasteboardSnapshot?
-    private var activeBridgeChangeCount: Int?
-    private var shouldRestoreActiveSnapshot = false
+    private let clipboard = OneShotClipboard()
+    private let logger = Logger(subsystem: "com.example.DoubaoVoiceBridge.Fn", category: "delivery")
+    private var pipeline: DeliveryPipeline?
 
     func deliver(
         text: String,
@@ -53,125 +42,71 @@ final class UURemoteDelivery {
         cleanupCompletion: @escaping () -> Void
     ) {
         precondition(Thread.isMainThread)
+        guard pipeline == nil else { completion(.failure(DeliveryError.deliveryBusy)); return }
+        guard !text.isEmpty else { completion(.failure(DeliveryError.emptyText)); return }
+        guard AXIsProcessTrusted() else { completion(.failure(DeliveryError.accessibilityMissing)); return }
+        guard !target.isTerminated else { completion(.failure(DeliveryError.targetAppMissing)); return }
 
-        guard !text.isEmpty else {
-            completion(.failure(DeliveryError.emptyText))
-            return
-        }
-        guard AXIsProcessTrusted() else {
-            completion(.failure(DeliveryError.accessibilityMissing))
-            return
-        }
-        guard !target.isTerminated else {
-            cleanupCompletion()
-            completion(.failure(DeliveryError.targetAppMissing))
-            return
-        }
-
-        let shouldRestore = UserDefaults.standard.bool(forKey: "restoreClipboard")
-        let snapshot = PasteboardSnapshot.capture(from: pasteboard)
-        if shouldRestore && snapshot == nil {
-            completion(.failure(DeliveryError.clipboardSnapshotUnavailable))
-            return
-        }
-
-        pasteboard.clearContents()
-        guard pasteboard.setString(text, forType: .string) else {
-            snapshot?.restore(to: pasteboard)
-            completion(.failure(DeliveryError.pasteboardUnavailable))
-            return
-        }
-        let bridgeChangeCount = pasteboard.changeCount
-        activeSnapshot = snapshot
-        activeBridgeChangeCount = bridgeChangeCount
-        shouldRestoreActiveSnapshot = shouldRestore
-        let lengthBucket = PrivacySafeTextMetrics.lengthBucket(text.utf16.count)
-        logger.notice(
-            "Transcript staged for UU lengthBucket=\(lengthBucket, privacy: .public) pasteboardGeneration=\(bridgeChangeCount, privacy: .private)"
-        )
         let configuredDelay = UserDefaults.standard.double(forKey: "pasteDelay")
-        let syncDelay = min(
-            max(configuredDelay, Self.minimumPasteDelay),
-            Self.maximumPasteDelay
-        )
-
-        // Activate UU immediately so its clipboard bridge has the full delay
-        // to synchronize before the paste shortcut is sent.
-        panelWillHide()
-        target.activateOriginalWindow()
-        logger.notice("Original UU window activation requested; waiting for clipboard synchronization")
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + syncDelay) { [weak self] in
-            guard let self else { return }
-            guard !target.isTerminated else {
-                self.restoreImmediatelyIfSafe(snapshot, expectedChangeCount: bridgeChangeCount)
-                self.clearActiveDelivery()
-                completion(.failure(DeliveryError.targetAppMissing))
-                cleanupCompletion()
-                return
-            }
-            guard self.pasteboard.changeCount == bridgeChangeCount,
-                  NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processIdentifier,
-                  target.stillMatchesFocusedWindow() else {
-                self.restoreImmediatelyIfSafe(snapshot, expectedChangeCount: bridgeChangeCount)
-                self.clearActiveDelivery()
-                completion(.failure(DeliveryError.targetChanged))
-                cleanupCompletion()
-                return
-            }
-
-            ClipboardKeyboardPaster.postCommandV { result in
-                switch result {
-                case .success:
-                    self.logger.notice("Complete Command-V key sequence posted to UU")
-                    completion(.success(()))
-                    guard shouldRestore, let snapshot else {
-                        self.clearActiveDelivery()
-                        cleanupCompletion()
-                        return
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                        if self.pasteboard.changeCount == bridgeChangeCount {
-                            snapshot.restore(to: self.pasteboard)
-                            self.logger.notice("Original clipboard restored")
-                        }
-                        self.clearActiveDelivery()
-                        cleanupCompletion()
-                    }
-                case .failure(let error):
-                    self.restoreImmediatelyIfSafe(snapshot, expectedChangeCount: bridgeChangeCount)
-                    self.clearActiveDelivery()
-                    completion(.failure(error))
-                    cleanupCompletion()
+        let syncDelay = min(max(configuredDelay, Self.minimumPasteDelay), Self.maximumPasteDelay)
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        var lastFocus: DeliveryFocusState?
+        var lastClipboardStatus: String?
+        let environment = DeliveryPipeline.Environment(
+            now: { ProcessInfo.processInfo.systemUptime },
+            schedule: { delay, action in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action) },
+            activate: {
+                panelWillHide()
+                target.activateOriginalWindow()
+                self.logger.notice("Original UU activation requested; awaiting stable target window")
+            },
+            focus: {
+                let state = target.deliveryFocusState()
+                if state != lastFocus {
+                    let description = String(describing: state)
+                    self.logger.notice("Delivery focus=\(description, privacy: .public)")
+                    lastFocus = state
                 }
+                return state
+            },
+            stage: { transcript in
+                let success = self.clipboard.stage(transcript)
+                self.logger.notice("Transcript clipboard staged once hostOnly=true success=\(success, privacy: .public)")
+                return success
+            },
+            clipboard: { transcript in
+                let state = self.clipboard.read(expectedText: transcript)
+                let description = "stable=\(state.stableRead) original=\(state.originalGeneration) matches=\(state.textMatches) plain=\(state.onlyPlainText) empty=\(state.empty)"
+                if description != lastClipboardStatus {
+                    self.logger.notice("Clipboard check \(description, privacy: .public)")
+                    lastClipboardStatus = description
+                }
+                return state
+            },
+            paste: { callback in ClipboardKeyboardPaster.postCommandV(completion: callback) }
+        )
+        let attempt = DeliveryPipeline(environment: environment, syncDelay: syncDelay) { [weak self] result in
+            guard let self else { return }
+            self.pipeline = nil
+            let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+            switch result {
+            case .success:
+                self.logger.notice("Complete Command-V posted once elapsed=\(elapsed, privacy: .public); no clipboard restoration")
+            case .failure(let error):
+                let reason = String(describing: error)
+                self.logger.notice("Delivery cancelled reason=\(reason, privacy: .public) elapsed=\(elapsed, privacy: .public); no clipboard restoration")
             }
+            completion(result)
+            cleanupCompletion()
         }
+        pipeline = attempt
+        attempt.start(text: text)
     }
 
-    func restoreClipboardForTermination() {
+    func cancelForTermination() {
         precondition(Thread.isMainThread)
-        guard shouldRestoreActiveSnapshot,
-              let snapshot = activeSnapshot,
-              let changeCount = activeBridgeChangeCount else {
-            clearActiveDelivery()
-            return
-        }
-        restoreImmediatelyIfSafe(snapshot, expectedChangeCount: changeCount)
-        clearActiveDelivery()
-    }
-
-    private func restoreImmediatelyIfSafe(
-        _ snapshot: PasteboardSnapshot?,
-        expectedChangeCount: Int
-    ) {
-        guard let snapshot, pasteboard.changeCount == expectedChangeCount else { return }
-        snapshot.restore(to: pasteboard)
-    }
-
-    private func clearActiveDelivery() {
-        activeSnapshot = nil
-        activeBridgeChangeCount = nil
-        shouldRestoreActiveSnapshot = false
+        pipeline?.cancelForTermination()
+        pipeline = nil
     }
 }
 
@@ -180,7 +115,7 @@ enum ClipboardKeyboardPaster {
     private static let vKeyCode: CGKeyCode = 9
     private static let interEventDelay: TimeInterval = 0.025
     private static let eventQueue = DispatchQueue(
-        label: "com.lyp.DoubaoVoiceBridge.command-v",
+        label: "com.example.DoubaoVoiceBridge.Fn.command-v",
         qos: .userInteractive
     )
 
@@ -219,7 +154,7 @@ enum ClipboardKeyboardPaster {
         for event in events {
             event.setIntegerValueField(
                 .eventSourceUserData,
-                value: ControlHoldMonitor.syntheticEventMarker
+                value: FnHoldMonitor.syntheticEventMarker
             )
         }
         return events

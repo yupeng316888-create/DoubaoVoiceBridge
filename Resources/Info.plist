@@ -1,36 +1,36 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>zh_CN</string>
-    <key>CFBundleDisplayName</key>
-    <string>远控听写</string>
-    <key>CFBundleExecutable</key>
-    <string>DoubaoVoiceBridge</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.lyp.DoubaoVoiceBridge</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>CFBundleName</key>
-    <string>远控听写</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>2.3.0</string>
-    <key>CFBundleVersion</key>
-    <string>5</string>
-    <key>LSApplicationCategoryType</key>
-    <string>public.app-category.productivity</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSHumanReadableCopyright</key>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_CN</string>
+	<key>CFBundleDisplayName</key>
+	<string>UU 远控听写 Fn</string>
+	<key>CFBundleExecutable</key>
+	<string>DoubaoVoiceBridge</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.example.DoubaoVoiceBridge.Fn</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>UU 远控听写 Fn</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>2.3.4</string>
+	<key>CFBundleVersion</key>
+	<string>9</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 DoubaoVoiceBridge contributors</string>
-    <key>NSInputMonitoringUsageDescription</key>
-    <string>用于在 UU 远控处于前台时识别长按左 Control，并启动豆包语音输入法。</string>
+	<key>NSInputMonitoringUsageDescription</key>
+	<string>在 UU 远控处于前台时识别长按 Fn，并调用本机豆包语音输入。</string>
 </dict>
 </plist>

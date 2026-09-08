@@ -4,6 +4,9 @@ set -euo pipefail
 project_root="${0:A:h:h}"
 cd "$project_root"
 
+print -u2 "This is the Fn experimental branch; use scripts/build-fn-app.sh. Read FN-VARIANT.md first."
+exit 1
+
 swift build -c release --arch x86_64 -j 2
 swift build -c release --arch arm64 -j 2
 

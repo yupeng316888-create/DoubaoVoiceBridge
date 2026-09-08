@@ -30,9 +30,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static let uuRemoteBundleIdentifier = "com.netease.uuremote"
     private static let latencyDefaultsMigrationKey = "didMigrateLatencyDefaultsV23"
 
-    private let logger = Logger(subsystem: "com.lyp.DoubaoVoiceBridge", category: "app")
+    private let logger = Logger(subsystem: "com.example.DoubaoVoiceBridge.Fn", category: "app")
     private let coordinator = SessionCoordinator()
-    private var monitor: ControlHoldMonitor?
+    private var monitor: FnHoldMonitor?
     private var statusItem: NSStatusItem?
     private var statusText = "正在启动…"
     private var statusIsError = false
@@ -47,9 +47,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         UserDefaults.standard.register(defaults: [
             "pasteDelay": UURemoteDelivery.defaultPasteDelay,
-            "restoreClipboard": true,
             "autoPasteUU": true,
-            "controlHoldThreshold": 0.18
+            "fnHoldThreshold": 0.18
         ])
         UserDefaults.standard.set(true, forKey: "autoPasteUU")
         migrateLatencyDefaultsIfNeeded()
@@ -59,8 +58,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.setStatus(text, isError: isError)
         }
 
-        let monitor = ControlHoldMonitor(
-            holdThreshold: UserDefaults.standard.double(forKey: "controlHoldThreshold"),
+        let monitor = FnHoldMonitor(
+            holdThreshold: UserDefaults.standard.double(forKey: "fnHoldThreshold"),
             targetProvider: { [weak self] in
                 guard let self, self.coordinator.canBegin else { return nil }
                 return self.currentUURemoteTarget()
@@ -69,7 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.coordinator.isLocalComposerReady ?? false
             },
             onBegin: { [weak self] target in self?.coordinator.begin(target: target) },
-            onRelease: { [weak self] in self?.coordinator.controlReleased() },
+            onRelease: { [weak self] in self?.coordinator.fnReleased() },
             onCancel: { [weak self] in self?.coordinator.cancel() }
         )
         self.monitor = monitor
@@ -134,7 +133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menu.addItem(status)
 
-        let instruction = NSMenuItem(title: "按住左 ⌃ 说话，松开自动上屏", action: nil, keyEquivalent: "")
+        let instruction = NSMenuItem(title: "按住Fn 说话，松开自动上屏", action: nil, keyEquivalent: "")
         instruction.isEnabled = false
         menu.addItem(instruction)
         menu.addItem(.separator())
@@ -165,7 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openComposerManually() {
         guard let target = currentUURemoteTarget() else {
-            setStatus("请先点回 UU 远控，再长按左 ⌃", isError: true)
+            setStatus("请先点回 UU 远控，再长按Fn", isError: true)
             return
         }
         target.captureFocusedWindow()
@@ -195,7 +194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try monitor.start()
             permissionRetryTimer?.invalidate()
             permissionRetryTimer = nil
-            setStatus("就绪 · 在 UU 远控中长按左 ⌃", isError: false)
+            setStatus("就绪 · 在 UU 远控中长按Fn", isError: false)
         } catch {
             logger.error("Unable to start control monitor: \(error.localizedDescription, privacy: .public)")
             setStatus("需要开启辅助功能与输入监控权限", isError: true)
@@ -269,11 +268,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let taps = Self.installedEventTaps()
         let bridgePID = ProcessInfo.processInfo.processIdentifier
-        guard UURemoteTapOrder.needsReinstall(
-            taps: taps,
-            bridgePID: bridgePID,
-            uuRemotePID: uuRemote.processIdentifier
-        ) else { return }
+        let inputProcesses = NSWorkspace.shared.runningApplications.filter {
+            $0.bundleIdentifier == "com.bytedance.inputmethod.doubaoime" && !$0.isTerminated
+        }.map(\.processIdentifier)
+        let competingPIDs = [uuRemote.processIdentifier] + inputProcesses
+        guard competingPIDs.contains(where: { pid in
+            UURemoteTapOrder.needsReinstall(
+                taps: taps,
+                bridgePID: bridgePID,
+                uuRemotePID: pid
+            )
+        }) else { return }
 
         let now = Date()
         tapReinstallTimes.removeAll { now.timeIntervalSince($0) > 5.0 }
@@ -282,7 +287,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         tapReinstallTimes.append(now)
-        logger.notice("UU keyboard tap moved ahead; reinstalling local head tap")
+        logger.notice("UU or Doubao keyboard listener moved ahead; reinstalling local head tap")
         monitor.stop()
         startMonitorOrRequestPermissions(promptIfNeeded: false)
     }
@@ -358,7 +363,6 @@ enum UURemoteTapOrder {
         let relevant = taps.enumerated().filter { _, tap in
             tap.isEnabled &&
                 tap.location == CGEventTapLocation.cghidEventTap.rawValue &&
-                tap.options == CGEventTapOptions.defaultTap.rawValue &&
                 (tap.eventMask & keyboardMask) != 0
         }
         guard let uuIndex = relevant.first(where: { $0.element.processIdentifier == uuRemotePID })?.offset else {

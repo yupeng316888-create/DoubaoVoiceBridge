@@ -2,17 +2,17 @@ import AppKit
 import ApplicationServices
 import os.log
 
-enum ControlMonitorError: LocalizedError {
+enum FnMonitorError: LocalizedError {
     case eventTapUnavailable
 
     var errorDescription: String? {
-        "无法监听左 Control，请开启“辅助功能”和“输入监控”权限"
+        "无法监听Fn，请开启“辅助功能”和“输入监控”权限"
     }
 }
 
-final class ControlHoldMonitor {
+final class FnHoldMonitor {
     static let syntheticEventMarker: Int64 = 0x4456_4252
-    private static let leftControlKeyCode: Int64 = 59
+    private static let fnKeyCode = FnKeyPolicy.keyCode
 
     private let holdThreshold: TimeInterval
     private let targetProvider: () -> UURemoteTarget?
@@ -20,7 +20,7 @@ final class ControlHoldMonitor {
     private let onBegin: (UURemoteTarget) -> Void
     private let onRelease: () -> Void
     private let onCancel: () -> Void
-    private let logger = Logger(subsystem: "com.lyp.DoubaoVoiceBridge", category: "control")
+    private let logger = Logger(subsystem: "com.example.DoubaoVoiceBridge.Fn", category: "fn")
 
     private var gesture = HoldGestureState()
     private var target: UURemoteTarget?
@@ -28,11 +28,10 @@ final class ControlHoldMonitor {
     private var syntheticDownWorkItem: DispatchWorkItem?
     private var syntheticDownPosted = false
     private var syntheticDownAt: Date?
-    private var syntheticRoute: SyntheticControlRoute?
+    private var syntheticRoute: SyntheticFnRoute?
     private var localFocusDeadline: Date?
     private var releaseRequestedBeforeSyntheticDown = false
-    private var physicalLeftControlIsDown = false
-    private var physicalRightControlIsDown = false
+    private var physicalFnIsDown = false
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private(set) var activeTapLocation: CGEventTapLocation?
@@ -75,7 +74,7 @@ final class ControlHoldMonitor {
 
         let callback: CGEventTapCallBack = { proxy, type, event, userInfo in
             guard let userInfo else { return Unmanaged.passUnretained(event) }
-            let monitor = Unmanaged<ControlHoldMonitor>.fromOpaque(userInfo).takeUnretainedValue()
+            let monitor = Unmanaged<FnHoldMonitor>.fromOpaque(userInfo).takeUnretainedValue()
             return monitor.handle(proxy: proxy, type: type, event: event)
         }
 
@@ -88,17 +87,16 @@ final class ControlHoldMonitor {
             callback: callback,
             userInfo: userInfo
         ) else {
-            throw ControlMonitorError.eventTapUnavailable
+            throw FnMonitorError.eventTapUnavailable
         }
         guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
             CFMachPortInvalidate(tap)
-            throw ControlMonitorError.eventTapUnavailable
+            throw FnMonitorError.eventTapUnavailable
         }
 
         eventTap = tap
         activeTapLocation = .cghidEventTap
-        physicalLeftControlIsDown = CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(Self.leftControlKeyCode))
-        physicalRightControlIsDown = CGEventSource.keyState(.combinedSessionState, key: 62)
+        physicalFnIsDown = CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(Self.fnKeyCode))
         runLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
@@ -123,8 +121,7 @@ final class ControlHoldMonitor {
             logger.error("HID event tap disabled; re-enabling (reason=\(type.rawValue, privacy: .public))")
             if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
             resetGesture(notifyCancel: true)
-            physicalLeftControlIsDown = CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(Self.leftControlKeyCode))
-            physicalRightControlIsDown = CGEventSource.keyState(.combinedSessionState, key: 62)
+            physicalFnIsDown = CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(Self.fnKeyCode))
             return Unmanaged.passUnretained(event)
         }
 
@@ -133,31 +130,20 @@ final class ControlHoldMonitor {
         }
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        if type == .flagsChanged, keyCode == 62 {
-            physicalRightControlIsDown.toggle()
-            if gesture.phase == .pending {
-                beginPassthroughForChord()
-            } else if gesture.phase == .dictating {
-                onCancel()
-                resetGesture(notifyCancel: false)
-            }
-            return Unmanaged.passUnretained(event)
-        }
-        if type == .flagsChanged, keyCode == Self.leftControlKeyCode {
-            physicalLeftControlIsDown.toggle()
-            let isDown = physicalLeftControlIsDown
+        if type == .flagsChanged, keyCode == Self.fnKeyCode {
+            physicalFnIsDown = FnKeyPolicy.isDown(flags: event.flags)
+            let isDown = physicalFnIsDown
             if isDown, case .idle = gesture.phase {
-                let conflictingFlags: CGEventFlags = [.maskShift, .maskAlternate, .maskCommand, .maskSecondaryFn]
-                if physicalRightControlIsDown || !event.flags.intersection(conflictingFlags).isEmpty {
+                if FnKeyPolicy.hasConflictingModifiers(flags: event.flags) {
                     return Unmanaged.passUnretained(event)
                 }
             }
-            return handleLeftControl(isDown: isDown, event: event)
+            return handleFn(isDown: isDown, event: event, proxy: proxy)
         }
 
         switch gesture.phase {
         case .pending:
-            logger.notice("Control hold became a chord; restoring remote Control passthrough")
+            logger.notice("Fn hold became a chord; restoring remote Fn passthrough")
             beginPassthroughForChord(proxy: proxy)
         case .idle, .dictating, .passthrough:
             break
@@ -165,19 +151,19 @@ final class ControlHoldMonitor {
         return Unmanaged.passUnretained(event)
     }
 
-    private func handleLeftControl(isDown: Bool, event: CGEvent) -> Unmanaged<CGEvent>? {
+    private func handleFn(isDown: Bool, event: CGEvent, proxy: CGEventTapProxy) -> Unmanaged<CGEvent>? {
         if isDown {
             guard case .idle = gesture.phase else {
                 return gesture.phase == .passthrough ? Unmanaged.passUnretained(event) : nil
             }
             guard let target = targetProvider() else {
-                logger.notice("Left Control passed through because UU is not eligible")
+                logger.notice("Fn passed through because UU is not eligible")
                 return Unmanaged.passUnretained(event)
             }
 
-            logger.notice("Physical left Control down intercepted for local dictation")
+            logger.notice("Physical Fn down intercepted for local dictation")
             self.target = target
-            _ = gesture.handle(.controlDown(targetAvailable: true))
+            _ = gesture.handle(.fnDown(targetAvailable: true))
             let workItem = DispatchWorkItem { [weak self] in self?.activateDictationIfStillPending() }
             activationWorkItem = workItem
             DispatchQueue.main.asyncAfter(deadline: .now() + holdThreshold, execute: workItem)
@@ -188,20 +174,22 @@ final class ControlHoldMonitor {
         case .idle:
             return Unmanaged.passUnretained(event)
         case .pending:
-            logger.notice("Physical left Control released before long-press threshold")
-            _ = gesture.handle(.controlUp)
+            logger.notice("Physical Fn released before long-press threshold")
+            _ = gesture.handle(.fnUp)
+            // Preserve a short Fn tap: deliver its down before the physical up.
+            postSyntheticFn(down: true, route: .remoteHIDPassthrough, proxy: proxy)
             resetGesture(notifyCancel: false)
-            return nil
+            return Unmanaged.passUnretained(event)
         case .passthrough:
-            _ = gesture.handle(.controlUp)
-            // The real left-Control release is about to pass through, so it
+            _ = gesture.handle(.fnUp)
+            // The real Fn release is about to pass through, so it
             // completes the synthetic down used to recover the chord.
             syntheticDownPosted = false
             resetGesture(notifyCancel: false)
             return Unmanaged.passUnretained(event)
         case .dictating:
-            logger.notice("Physical left Control released; finishing local dictation")
-            _ = gesture.handle(.controlUp)
+            logger.notice("Physical Fn released; finishing local dictation")
+            _ = gesture.handle(.fnUp)
             finishDictationGesture()
             return nil
         }
@@ -209,7 +197,7 @@ final class ControlHoldMonitor {
 
     private func activateDictationIfStillPending() {
         guard case .pending = gesture.phase, let target else { return }
-        guard !physicalRightControlIsDown,
+        guard physicalFnIsDown,
               targetProvider()?.processIdentifier == target.processIdentifier else {
             logger.notice("Long-press cancelled because UU is no longer the eligible target")
             resetGesture(notifyCancel: false)
@@ -241,9 +229,9 @@ final class ControlHoldMonitor {
             return
         }
         logger.notice("Local composer is key and ready for Doubao voice input method")
-        let route = SyntheticControlRoute.localSessionDictation
-        guard postSyntheticControl(down: true, route: route) else {
-            logger.error("Unable to create synthetic local Control down")
+        let route = SyntheticFnRoute.localSessionDictation
+        guard postSyntheticFn(down: true, route: route) else {
+            logger.error("Unable to create synthetic local Fn down")
             onCancel()
             resetGesture(notifyCancel: false)
             return
@@ -251,7 +239,7 @@ final class ControlHoldMonitor {
         syntheticDownPosted = true
         syntheticDownAt = Date()
         syntheticRoute = route
-        logger.notice("Synthetic local Control down posted at session tap")
+        logger.notice("Synthetic local Fn down posted at session tap")
     }
 
     private func scheduleSyntheticDownCheck(after delay: TimeInterval) {
@@ -264,7 +252,7 @@ final class ControlHoldMonitor {
     private func finishDictationGesture() {
         if syntheticDownPosted {
             if let syntheticRoute {
-                postSyntheticControl(down: false, route: syntheticRoute)
+                postSyntheticFn(down: false, route: syntheticRoute)
             }
             syntheticDownPosted = false
             let heldLongEnough = Date().timeIntervalSince(syntheticDownAt ?? .distantPast) >= 0.15
@@ -272,7 +260,7 @@ final class ControlHoldMonitor {
                 logger.notice("Local Doubao voice input method gesture completed; waiting for transcript")
                 onRelease()
             } else {
-                logger.notice("Synthetic local Control hold was too short; cancelling")
+                logger.notice("Synthetic local Fn hold was too short; cancelling")
                 onCancel()
             }
             resetGesture(notifyCancel: false)
@@ -287,19 +275,19 @@ final class ControlHoldMonitor {
         activationWorkItem = nil
         _ = gesture.handle(.otherInput)
         target = nil
-        let route = SyntheticControlRoute.remoteHIDPassthrough
-        if postSyntheticControl(down: true, route: route, proxy: proxy) {
+        let route = SyntheticFnRoute.remoteHIDPassthrough
+        if postSyntheticFn(down: true, route: route, proxy: proxy) {
             syntheticDownPosted = true
             syntheticRoute = route
         } else {
-            logger.error("Unable to recover remote Control chord")
+            logger.error("Unable to recover remote Fn chord")
         }
     }
 
     private func resetGesture(notifyCancel: Bool) {
         let wasDictating = gesture.phase == .dictating
         if syntheticDownPosted, let syntheticRoute {
-            postSyntheticControl(down: false, route: syntheticRoute)
+            postSyntheticFn(down: false, route: syntheticRoute)
         }
         activationWorkItem?.cancel()
         syntheticDownWorkItem?.cancel()
@@ -316,23 +304,20 @@ final class ControlHoldMonitor {
     }
 
     @discardableResult
-    private func postSyntheticControl(
+    private func postSyntheticFn(
         down: Bool,
-        route: SyntheticControlRoute,
+        route: SyntheticFnRoute,
         proxy: CGEventTapProxy? = nil
     ) -> Bool {
         guard let source = CGEventSource(stateID: .combinedSessionState),
               let event = CGEvent(source: source) else { return false }
         event.type = .flagsChanged
-        event.setIntegerValueField(.keyboardEventKeycode, value: Self.leftControlKeyCode)
+        event.setIntegerValueField(.keyboardEventKeycode, value: Self.fnKeyCode)
         event.setIntegerValueField(.eventSourceUserData, value: Self.syntheticEventMarker)
-        var flags = CGEventSource.flagsState(.combinedSessionState)
-        if down {
-            flags.insert(.maskControl)
-        } else if !physicalRightControlIsDown {
-            flags.remove(.maskControl)
-        }
-        event.flags = flags
+        event.flags = FnKeyPolicy.flags(
+            for: down,
+            preserving: CGEventSource.flagsState(.combinedSessionState)
+        )
         if route == .remoteHIDPassthrough, let proxy {
             event.tapPostEvent(proxy)
         } else {
@@ -342,7 +327,7 @@ final class ControlHoldMonitor {
     }
 }
 
-enum SyntheticControlRoute: Equatable {
+enum SyntheticFnRoute: Equatable {
     case remoteHIDPassthrough
     case localSessionDictation
 

@@ -9,7 +9,7 @@ final class DictationPanel: NSPanel {
 final class ComposerTextView: NSTextView {
     var onCommit: (() -> Void)?
     var onCancel: (() -> Void)?
-    var onControlReleased: (() -> Void)?
+    var onFnReleased: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
         let isReturn = event.keyCode == 36 || event.keyCode == 76
@@ -29,8 +29,8 @@ final class ComposerTextView: NSTextView {
 
     override func flagsChanged(with event: NSEvent) {
         super.flagsChanged(with: event)
-        if event.keyCode == 59, !event.modifierFlags.contains(.control) {
-            onControlReleased?()
+        if event.keyCode == UInt16(FnKeyPolicy.keyCode), !event.modifierFlags.contains(.function) {
+            onFnReleased?()
         }
     }
 }
@@ -83,14 +83,14 @@ enum TranscriptSettlePolicy {
 final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
     var onCommit: ((String) -> Void)?
     var onCancel: (() -> Void)?
-    var onControlReleased: (() -> Void)?
+    var onFnReleased: (() -> Void)?
     var onTranscriptTimeout: (() -> Void)?
 
     private let textView = ComposerTextView()
     private let scrollView = NSScrollView()
     private let statusLabel = NSTextField(labelWithString: "")
     private let targetLabel = NSTextField(labelWithString: "")
-    private let logger = Logger(subsystem: "com.lyp.DoubaoVoiceBridge", category: "composer")
+    private let logger = Logger(subsystem: "com.example.DoubaoVoiceBridge.Fn", category: "composer")
     private var settleWorkItem: DispatchWorkItem?
     private var settleStartedAt: Date?
     private var lastTextChangeAt = Date()
@@ -136,7 +136,7 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         textView.isEditable = true
         lastTextChangeAt = Date()
         targetLabel.stringValue = targetDescription
-        statusLabel.stringValue = "正在启动豆包语音输入法…按住左 ⌃ 说话，松开后自动发送"
+        statusLabel.stringValue = "正在启动豆包语音输入法…按住Fn 说话，松开后自动发送"
         statusLabel.textColor = .secondaryLabelColor
 
         guard let window else { return }
@@ -164,7 +164,7 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         isWaitingForFinalTranscript = false
         acceptsTranscriptUpdates = false
         cancelSettleTimer()
-        statusLabel.stringValue = "识别完成，正在同步到 Mac mini…"
+        statusLabel.stringValue = "识别完成，正在同步到远端…"
         statusLabel.textColor = .secondaryLabelColor
         textView.isEditable = false
         window?.makeFirstResponder(nil)
@@ -220,8 +220,8 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
                     : "已收到识别文字，正在准备自动发送…"
             } else {
                 statusLabel.stringValue = marked
-                    ? "豆包语音输入法正在识别…按住左 ⌃ 继续说话"
-                    : "已收到识别文字，松开左 ⌃ 后自动发送"
+                    ? "豆包语音输入法正在识别…按住Fn 继续说话"
+                    : "已收到识别文字，松开Fn 后自动发送"
             }
         }
     }
@@ -252,7 +252,7 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         textView.textContainerInset = NSSize(width: 12, height: 10)
         textView.onCommit = { [weak self] in self?.commitCurrentText() }
         textView.onCancel = { [weak self] in self?.onCancel?() }
-        textView.onControlReleased = { [weak self] in self?.onControlReleased?() }
+        textView.onFnReleased = { [weak self] in self?.onFnReleased?() }
 
         ComposerTextLayout.attach(textView, to: scrollView)
         scrollView.hasVerticalScroller = true
