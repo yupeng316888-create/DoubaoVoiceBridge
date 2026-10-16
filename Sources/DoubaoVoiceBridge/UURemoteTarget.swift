@@ -1,7 +1,14 @@
 import AppKit
 import ApplicationServices
 
-final class UURemoteTarget {
+protocol RemoteDeliveryTarget {
+    var isTerminated: Bool { get }
+    var processIdentifier: pid_t { get }
+    func activateOriginalWindow()
+    func stillMatchesFocusedWindow() -> Bool
+}
+
+final class UURemoteTarget: RemoteDeliveryTarget {
     let application: NSRunningApplication
     private var focusedWindow: AXUIElement?
 

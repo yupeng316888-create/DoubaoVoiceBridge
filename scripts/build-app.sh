@@ -10,9 +10,11 @@ swift build -c release --arch arm64 -j 2
 stage_root="$(mktemp -d "${TMPDIR:-/tmp}/doubao-voice-bridge.XXXXXX")"
 trap 'rm -rf "$stage_root"' EXIT
 
-stage_app="$stage_root/远控听写.app"
+stage_app="$stage_root/远控听写·自动适配.app"
 mkdir -p "$stage_app/Contents/MacOS" "$stage_app/Contents/Resources"
 cp "$project_root/Resources/Info.plist" "$stage_app/Contents/Info.plist"
+cp "$project_root/Resources/AppIcon.icns" "$stage_app/Contents/Resources/AppIcon.icns"
+cp "$project_root/LICENSE" "$stage_app/Contents/Resources/LICENSE"
 
 lipo -create \
     "$project_root/.build/x86_64-apple-macosx/release/DoubaoVoiceBridge" \
@@ -26,7 +28,7 @@ codesign --force --sign - \
     "$stage_app"
 
 mkdir -p "$project_root/dist"
-output_app="$project_root/dist/远控听写.app"
+output_app="$project_root/dist/远控听写·自动适配.app"
 if [[ -e "$output_app" ]]; then
     rm -rf "$output_app"
 fi

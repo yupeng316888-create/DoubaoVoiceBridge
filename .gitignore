@@ -8,3 +8,16 @@ xcuserdata/
 *.log
 .idea/
 .vscode/
+
+# Machine-local acceptance records and generation metadata
+/VERIFICATION.md
+/Resources/AppIcon.provenance.json
+/output/
+/tmp/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx

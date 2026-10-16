@@ -42,6 +42,7 @@ enum Diagnostics {
             ("input_monitoring", CGPreflightListenEventAccess() ? "granted" : "missing"),
             ("hid_event_tap", probeTap == nil ? "unavailable" : "available"),
             ("doubao", FileManager.default.fileExists(atPath: doubaoPath) ? "installed" : "missing"),
+            ("doubao_shortcut_ax", DoubaoShortcutSettingsReader.visibleSettingsDiagnostics()),
             ("uuremote", uuRemote == nil ? "not_running" : "running"),
             ("frontmost", workspace.frontmostApplication?.bundleIdentifier ?? "unknown")
         ]

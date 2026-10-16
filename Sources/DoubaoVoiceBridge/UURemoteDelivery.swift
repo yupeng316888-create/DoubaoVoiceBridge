@@ -9,6 +9,7 @@ enum DeliveryError: LocalizedError, Equatable {
     case clipboardSnapshotUnavailable
     case pasteboardUnavailable
     case targetChanged
+    case clipboardChanged
     case keyboardEventFailed
     case modifierKeysActive
 
@@ -26,6 +27,8 @@ enum DeliveryError: LocalizedError, Equatable {
             return "无法写入系统剪贴板"
         case .targetChanged:
             return "发送前焦点发生变化，已取消自动粘贴"
+        case .clipboardChanged:
+            return "等待 UU 同步时剪贴板文字已改变，已取消自动粘贴"
         case .keyboardEventFailed:
             return "无法发送 Command-V"
         case .modifierKeysActive:
@@ -39,15 +42,38 @@ final class UURemoteDelivery {
     static let minimumPasteDelay: TimeInterval = 0.45
     static let maximumPasteDelay: TimeInterval = 3.0
 
-    private let pasteboard = NSPasteboard.general
+    private let pasteboard: NSPasteboard
+    private let defaults: UserDefaults
+    private let accessibilityGranted: () -> Bool
+    private let frontmostPID: () -> pid_t?
+    private let schedule: (TimeInterval, @escaping () -> Void) -> Void
+    private let postPaste: (@escaping () -> DeliveryError?, @escaping (Result<Void, Error>) -> Void) -> Void
     private let logger = Logger(subsystem: "com.lyp.DoubaoVoiceBridge", category: "delivery")
     private var activeSnapshot: PasteboardSnapshot?
     private var activeBridgeChangeCount: Int?
     private var shouldRestoreActiveSnapshot = false
 
+    init(
+        pasteboard: NSPasteboard = .general,
+        defaults: UserDefaults = .standard,
+        accessibilityGranted: @escaping () -> Bool = { AXIsProcessTrusted() },
+        frontmostPID: @escaping () -> pid_t? = { NSWorkspace.shared.frontmostApplication?.processIdentifier },
+        schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        },
+        postPaste: @escaping (@escaping () -> DeliveryError?, @escaping (Result<Void, Error>) -> Void) -> Void = ClipboardKeyboardPaster.postCommandV
+    ) {
+        self.pasteboard = pasteboard
+        self.defaults = defaults
+        self.accessibilityGranted = accessibilityGranted
+        self.frontmostPID = frontmostPID
+        self.schedule = schedule
+        self.postPaste = postPaste
+    }
+
     func deliver(
         text: String,
-        to target: UURemoteTarget,
+        to target: RemoteDeliveryTarget,
         panelWillHide: @escaping () -> Void,
         completion: @escaping (Result<Void, Error>) -> Void,
         cleanupCompletion: @escaping () -> Void
@@ -58,7 +84,7 @@ final class UURemoteDelivery {
             completion(.failure(DeliveryError.emptyText))
             return
         }
-        guard AXIsProcessTrusted() else {
+        guard accessibilityGranted() else {
             completion(.failure(DeliveryError.accessibilityMissing))
             return
         }
@@ -68,17 +94,50 @@ final class UURemoteDelivery {
             return
         }
 
-        let shouldRestore = UserDefaults.standard.bool(forKey: "restoreClipboard")
+        panelWillHide()
+        target.activateOriginalWindow()
+        waitForActivation(target, remainingAttempts: 20) { [weak self] ready in
+            guard let self else { return }
+            guard ready else {
+                completion(.failure(target.isTerminated ? DeliveryError.targetAppMissing : DeliveryError.targetChanged))
+                cleanupCompletion()
+                return
+            }
+            self.stageTranscript(text, to: target, completion: completion, cleanupCompletion: cleanupCompletion)
+        }
+    }
+
+    private func waitForActivation(_ target: RemoteDeliveryTarget, remainingAttempts: Int, completion: @escaping (Bool) -> Void) {
+        guard !target.isTerminated else { completion(false); return }
+        if frontmostPID() == target.processIdentifier && target.stillMatchesFocusedWindow() {
+            completion(true)
+            return
+        }
+        guard remainingAttempts > 0 else { completion(false); return }
+        schedule(0.05) { [weak self] in
+            self?.waitForActivation(target, remainingAttempts: remainingAttempts - 1, completion: completion)
+        }
+    }
+
+    private func stageTranscript(
+        _ text: String, to target: RemoteDeliveryTarget,
+        completion: @escaping (Result<Void, Error>) -> Void,
+        cleanupCompletion: @escaping () -> Void
+    ) {
+
+        let shouldRestore = defaults.bool(forKey: "restoreClipboard")
         let snapshot = PasteboardSnapshot.capture(from: pasteboard)
         if shouldRestore && snapshot == nil {
             completion(.failure(DeliveryError.clipboardSnapshotUnavailable))
+            cleanupCompletion()
             return
         }
 
-        pasteboard.clearContents()
+        let clearedGeneration = pasteboard.clearContents()
         guard pasteboard.setString(text, forType: .string) else {
-            snapshot?.restore(to: pasteboard)
+            restoreImmediatelyIfSafe(snapshot, expectedChangeCount: clearedGeneration)
             completion(.failure(DeliveryError.pasteboardUnavailable))
+            cleanupCompletion()
             return
         }
         let bridgeChangeCount = pasteboard.changeCount
@@ -89,19 +148,15 @@ final class UURemoteDelivery {
         logger.notice(
             "Transcript staged for UU lengthBucket=\(lengthBucket, privacy: .public) pasteboardGeneration=\(bridgeChangeCount, privacy: .private)"
         )
-        let configuredDelay = UserDefaults.standard.double(forKey: "pasteDelay")
+        let configuredDelay = defaults.double(forKey: "pasteDelay")
         let syncDelay = min(
             max(configuredDelay, Self.minimumPasteDelay),
             Self.maximumPasteDelay
         )
 
-        // Activate UU immediately so its clipboard bridge has the full delay
-        // to synchronize before the paste shortcut is sent.
-        panelWillHide()
-        target.activateOriginalWindow()
-        logger.notice("Original UU window activation requested; waiting for clipboard synchronization")
+        logger.notice("Original UU window is active; waiting for clipboard synchronization")
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + syncDelay) { [weak self] in
+        schedule(syncDelay) { [weak self] in
             guard let self else { return }
             guard !target.isTerminated else {
                 self.restoreImmediatelyIfSafe(snapshot, expectedChangeCount: bridgeChangeCount)
@@ -110,8 +165,14 @@ final class UURemoteDelivery {
                 cleanupCompletion()
                 return
             }
-            guard self.pasteboard.changeCount == bridgeChangeCount,
-                  NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processIdentifier,
+            guard self.pasteboard.string(forType: .string) == text else {
+                self.logger.error("Clipboard text changed while waiting for UU; keeping the transcript for retry")
+                self.clearActiveDelivery()
+                completion(.failure(DeliveryError.clipboardChanged))
+                cleanupCompletion()
+                return
+            }
+            guard self.frontmostPID() == target.processIdentifier,
                   target.stillMatchesFocusedWindow() else {
                 self.restoreImmediatelyIfSafe(snapshot, expectedChangeCount: bridgeChangeCount)
                 self.clearActiveDelivery()
@@ -120,7 +181,20 @@ final class UURemoteDelivery {
                 return
             }
 
-            ClipboardKeyboardPaster.postCommandV { result in
+            // Clipboard synchronization can republish the same transcript in
+            // a new generation. Check the payload, not just the generation,
+            // before pasting. Restoration still requires our own generation
+            // so we never replace a later copy made by the user or UU.
+            if self.pasteboard.changeCount != bridgeChangeCount {
+                self.logger.notice("Clipboard was republished with unchanged text; continuing paste without claiming ownership")
+            }
+
+            self.postPaste({
+                if target.isTerminated { return .targetAppMissing }
+                if self.pasteboard.string(forType: .string) != text { return .clipboardChanged }
+                if self.frontmostPID() != target.processIdentifier || !target.stillMatchesFocusedWindow() { return .targetChanged }
+                return nil
+            }) { result in
                 switch result {
                 case .success:
                     self.logger.notice("Complete Command-V key sequence posted to UU")
@@ -130,7 +204,7 @@ final class UURemoteDelivery {
                         cleanupCompletion()
                         return
                     }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    self.schedule(2.0) {
                         if self.pasteboard.changeCount == bridgeChangeCount {
                             snapshot.restore(to: self.pasteboard)
                             self.logger.notice("Original clipboard restored")
@@ -225,7 +299,8 @@ enum ClipboardKeyboardPaster {
         return events
     }
 
-    static func postCommandV(completion: @escaping (Result<Void, Error>) -> Void) {
+    static func postCommandV(validateTarget: @escaping () -> DeliveryError?, completion: @escaping (Result<Void, Error>) -> Void) {
+        precondition(Thread.isMainThread)
         let conflictingFlags: CGEventFlags = [
             .maskShift,
             .maskControl,
@@ -249,16 +324,18 @@ enum ClipboardKeyboardPaster {
             return
         }
 
+        if let error = validateTarget() {
+            completion(.failure(error))
+            return
+        }
+        // Check the target and post the first event together on main, without
+        // a queued gap in which another application can become the target.
+        events[0].post(tap: .cghidEventTap)
         eventQueue.async {
-            for (index, event) in events.enumerated() {
-                // Eligibility and modifier state are validated immediately
-                // before this queue starts. Once Command-down is posted, the
-                // remaining events run unconditionally so neither V nor
-                // Command can be left held by a blocking AX/focus check.
+            for event in events.dropFirst() {
+                Thread.sleep(forTimeInterval: interEventDelay)
+                // Always release both keys after starting the sequence.
                 event.post(tap: .cghidEventTap)
-                if index < events.count - 1 {
-                    Thread.sleep(forTimeInterval: interEventDelay)
-                }
             }
             DispatchQueue.main.async {
                 completion(.success(()))

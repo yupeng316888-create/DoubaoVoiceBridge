@@ -5,21 +5,23 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>zh_CN</string>
     <key>CFBundleDisplayName</key>
-    <string>远控听写</string>
+    <string>远控听写·自动适配</string>
     <key>CFBundleExecutable</key>
     <string>DoubaoVoiceBridge</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.lyp.DoubaoVoiceBridge</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>远控听写</string>
+    <string>远控听写·自动适配</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.3.0</string>
+    <string>2.6.4</string>
     <key>CFBundleVersion</key>
-    <string>5</string>
+    <string>13</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.productivity</string>
     <key>LSMinimumSystemVersion</key>
@@ -31,6 +33,6 @@
     <key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 DoubaoVoiceBridge contributors</string>
     <key>NSInputMonitoringUsageDescription</key>
-    <string>用于在 UU 远控处于前台时识别长按左 Control，并启动豆包语音输入法。</string>
+    <string>用于在 UU 远控处于前台时识别豆包语音快捷键，并启动本机豆包语音输入法。</string>
 </dict>
 </plist>

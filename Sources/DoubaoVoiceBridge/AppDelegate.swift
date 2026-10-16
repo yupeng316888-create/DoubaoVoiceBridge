@@ -32,11 +32,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let logger = Logger(subsystem: "com.lyp.DoubaoVoiceBridge", category: "app")
     private let coordinator = SessionCoordinator()
+    private let shortcutStore = ShortcutConfigurationStore()
     private var monitor: ControlHoldMonitor?
+    private var shortcutConfiguration: DoubaoShortcutConfiguration?
+    private var bridgeShortcutConfiguration: BridgeShortcutConfiguration = .followDoubao
+    private var shortcutProfile: ShortcutProfile?
+    private var settingsWindowController: ShortcutSettingsWindowController?
+    private var setupPending = false
     private var statusItem: NSStatusItem?
     private var statusText = "正在启动…"
     private var statusIsError = false
     private var permissionRetryTimer: Timer?
+    private var shortcutRefreshTimer: Timer?
     private var workspaceObservers: [NSObjectProtocol] = []
     private var observedUURemotePID: pid_t?
     private var eventTapNotificationTokens: [Int32] = []
@@ -47,7 +54,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         UserDefaults.standard.register(defaults: [
             "pasteDelay": UURemoteDelivery.defaultPasteDelay,
-            "restoreClipboard": true,
+            // UU has no delivery acknowledgement. Keep the transcript until
+            // the user chooses to replace it, unless restoration is opted in.
+            "restoreClipboard": false,
             "autoPasteUU": true,
             "controlHoldThreshold": 0.18
         ])
@@ -55,33 +64,99 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         migrateLatencyDefaultsIfNeeded()
 
         configureStatusItem()
+        refreshResolvedProfile()
+        coordinator.updateShortcutProfile(shortcutProfile)
         coordinator.onStatusChange = { [weak self] text, isError in
             self?.setStatus(text, isError: isError)
         }
 
         let monitor = ControlHoldMonitor(
+            profile: shortcutProfile,
             holdThreshold: UserDefaults.standard.double(forKey: "controlHoldThreshold"),
             targetProvider: { [weak self] in
                 guard let self, self.coordinator.canBegin else { return nil }
                 return self.currentUURemoteTarget()
             },
+            targetProviderDiagnostic: { [weak self] in
+                guard let self else { return "frontmostBundle=unavailable frontmostPID=-1 coordinator=unavailable" }
+                let frontmost = NSWorkspace.shared.frontmostApplication
+                let frontmostBundle = frontmost?.bundleIdentifier ?? "none"
+                let frontmostPID = frontmost?.processIdentifier ?? -1
+                return "frontmostBundle=\(frontmostBundle) frontmostPID=\(frontmostPID) \(self.coordinator.fnTriggerGateDiagnostic)"
+            },
+            targetIsActive: { target in
+                guard let frontmost = NSWorkspace.shared.frontmostApplication,
+                      !frontmost.isTerminated else { return false }
+                return frontmost.processIdentifier == target.processIdentifier ||
+                    frontmost.bundleIdentifier == Bundle.main.bundleIdentifier
+            },
             localComposerReady: { [weak self] in
                 self?.coordinator.isLocalComposerReady ?? false
             },
-            onBegin: { [weak self] target in self?.coordinator.begin(target: target) },
+            onBegin: { [weak self] target, profile in
+                self?.coordinator.begin(target: target, profile: profile)
+            },
+            onFnToggleMayBeActive: { [weak self] in
+                self?.coordinator.markLocalFnToggleMayBeActive()
+            },
             onRelease: { [weak self] in self?.coordinator.controlReleased() },
-            onCancel: { [weak self] in self?.coordinator.cancel() }
+            onCancel: { [weak self] in self?.coordinator.cancel() },
+            onTriggerUnavailable: { [weak self] message in
+                DispatchQueue.main.async { self?.setStatus(message, isError: true) }
+            }
         )
         self.monitor = monitor
+        coordinator.readyStatusProvider = { [weak self] in
+            guard let self else { return nil }
+            return ShortcutTriggerReadiness.status(
+                profile: self.shortcutProfile,
+                setupPending: self.setupPending,
+                monitorActive: self.monitor?.activeTapLocation != nil,
+                accessibilityTrusted: AXIsProcessTrusted()
+            )
+        }
+        coordinator.onUserCancelRequested = { [weak self] metadata in
+            guard let self else { return }
+            if let monitor = self.monitor {
+                monitor.cancelActiveSession(event: metadata)
+            } else {
+                self.coordinator.cancel()
+            }
+        }
         observeUURemoteLifecycle()
         observeEventTapChanges()
-        startMonitorOrRequestPermissions(promptIfNeeded: true)
+        shortcutRefreshTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.refreshDoubaoShortcut()
+        }
+        setupPending = !shortcutStore.didCompleteSetup || shortcutStore.hasCorruptOrIncompleteSavedConfiguration
+        if setupPending {
+            setStatus("首次配置：确认豆包按键与远控触发键", isError: false)
+            showShortcutSettings()
+            return
+        }
+        if shortcutProfile?.isSupported != true {
+            setupPending = true
+            setStatus("快捷键配置缺失或不受支持，请重新确认", isError: true)
+            showShortcutSettings()
+            return
+        }
+        startMonitorOrRequestPermissions(promptIfNeeded: false)
+        if shortcutConfiguration == nil {
+            setStatus("使用上次确认的豆包按键；打开设置可重新确认", isError: false)
+        }
+        showShortcutSettings()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showShortcutSettings()
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         monitor?.stop()
         coordinator.prepareForTermination()
         permissionRetryTimer?.invalidate()
+        shortcutRefreshTimer?.invalidate()
         tapOrderAuditWorkItem?.cancel()
         tapOrderAuditTimer?.invalidate()
         for token in eventTapNotificationTokens {
@@ -96,7 +171,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
             button.image = NSImage(systemSymbolName: "mic.and.signal.meter", accessibilityDescription: "远控听写")
-            button.toolTip = "远控听写"
+            button.toolTip = "远控听写 · 点击查看设置与状态"
+            button.setAccessibilityLabel("远控听写：设置与状态")
         }
         statusItem = item
         rebuildMenu()
@@ -124,7 +200,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func rebuildMenu() {
         let menu = NSMenu()
-        let status = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
+        let displayStatus: String
+        if !statusIsError, statusText.hasPrefix("就绪"), let profile = shortcutProfile {
+            displayStatus = "就绪 · " + ShortcutUsageCopy.make(doubao: profile.doubao, bridge: profile.bridge).title
+        } else { displayStatus = statusText }
+        let status = NSMenuItem(title: displayStatus, action: nil, keyEquivalent: "")
         status.isEnabled = false
         if statusIsError {
             status.attributedTitle = NSAttributedString(
@@ -134,18 +214,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menu.addItem(status)
 
-        let instruction = NSMenuItem(title: "按住左 ⌃ 说话，松开自动上屏", action: nil, keyEquivalent: "")
-        instruction.isEnabled = false
-        menu.addItem(instruction)
         menu.addItem(.separator())
-
+        let setup = NSMenuItem(title: "打开设置…", action: #selector(openShortcutSettingsFromMenu), keyEquivalent: "")
+        setup.target = self
+        menu.addItem(setup)
+        let more = NSMenuItem(title: "更多", action: nil, keyEquivalent: "")
+        let details = NSMenu()
+        for line in shortcutProfile?.statusMenuLines ?? ["尚未配置语音按键"] {
+            let item = NSMenuItem(title: line, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            details.addItem(item)
+        }
+        details.addItem(.separator())
+        for (title, action) in [
+            ("读取豆包快捷键", #selector(readDoubaoShortcut)),
+            ("打开豆包设置…", #selector(openDoubaoSettings)),
+            ("检查权限…", #selector(openPermissions))
+        ] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            details.addItem(item)
+        }
         let manual = NSMenuItem(title: "手动打开听写框", action: #selector(openComposerManually), keyEquivalent: "")
         manual.target = self
-        menu.addItem(manual)
-
-        let permissions = NSMenuItem(title: "检查 / 开启所需权限…", action: #selector(openPermissions), keyEquivalent: "")
-        permissions.target = self
-        menu.addItem(permissions)
+        manual.isEnabled = shortcutProfile?.supportsManualComposerEntry == true
+        details.addItem(manual)
+        more.submenu = details
+        menu.addItem(more)
 
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "退出远控听写", action: #selector(quitApplication), keyEquivalent: "q")
@@ -164,12 +259,153 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openComposerManually() {
-        guard let target = currentUURemoteTarget() else {
-            setStatus("请先点回 UU 远控，再长按左 ⌃", isError: true)
+        guard let shortcutProfile, shortcutProfile.isSupported else {
+            setStatus("尚未完成豆包与远控快捷键配置", isError: true)
             return
         }
-        target.captureFocusedWindow()
-        coordinator.begin(target: target)
+        guard shortcutProfile.supportsManualComposerEntry else {
+            setStatus("Fn 免按模式请使用已配置的触发键打开听写框", isError: true)
+            return
+        }
+        guard let target = currentUURemoteTarget() else {
+            setStatus("请先点回 UU 远控，再使用豆包快捷键", isError: true)
+            return
+        }
+        guard target.captureFocusedWindow() else {
+            setStatus("无法安全读取 UU 当前窗口；请检查辅助功能权限并确认 UU 窗口可访问", isError: true)
+            return
+        }
+        coordinator.begin(target: target, profile: shortcutProfile, manualEntry: true)
+    }
+
+    @objc private func openShortcutSettingsFromMenu() {
+        showShortcutSettings()
+    }
+
+    @objc private func readDoubaoShortcut() {
+        refreshDoubaoShortcut(forceStatus: true)
+        if setupPending {
+            showShortcutSettings()
+        }
+    }
+
+    private func showShortcutSettings() {
+        guard coordinator.canBegin, monitor?.isGestureIdle != false else {
+            setStatus("请先结束当前听写，再打开快捷键设置", isError: true)
+            return
+        }
+        if let settingsWindowController, settingsWindowController.window?.isVisible == true {
+            settingsWindowController.present()
+            return
+        }
+        let automatic = DoubaoShortcutSettingsReader.discover()
+        let controller = ShortcutSettingsWindowController(
+            automaticConfiguration: automatic,
+            confirmedConfiguration: DoubaoShortcutSettingsReader.hasVisibleSettingsWindow()
+                ? nil
+                : shortcutStore.loadLastConfirmedDoubaoConfiguration(),
+            manualConfiguration: shortcutStore.loadManualDoubaoConfiguration(),
+            bridgeConfiguration: shortcutStore.loadBridgeConfiguration()
+        )
+        controller.onOpenPermissions = { [weak self] in
+            self?.requestRequiredPermissions(forceOpenSettings: true)
+        }
+        controller.onOpenLocalTest = { [weak self] in
+            self?.openTextEditForLocalTest()
+        }
+        controller.onSave = { [weak self] selectedConfiguration, manualMode, manualShortcut, bridge in
+            guard let self else { return .failure(.message("应用已关闭，请重新打开设置。")) }
+            guard self.coordinator.canBegin, self.monitor?.isGestureIdle != false else {
+                self.setStatus("请先完成当前听写，再保存快捷键设置", isError: true)
+                return .failure(.message("当前听写尚未结束；结束后再保存配置。"))
+            }
+            let saved = self.shortcutStore.save(
+                confirmedDoubaoMode: selectedConfiguration.mode,
+                manualDoubaoMode: manualMode,
+                manualDoubaoShortcut: manualShortcut,
+                confirmedDoubaoShortcut: selectedConfiguration.shortcut,
+                bridge: bridge
+            )
+            guard saved else {
+                return .failure(.message("配置写入后回读校验失败；请重试。"))
+            }
+            self.shortcutConfiguration = selectedConfiguration
+            self.bridgeShortcutConfiguration = bridge
+            self.shortcutProfile = ShortcutProfile(doubao: selectedConfiguration, bridge: bridge)
+            self.setupPending = false
+            self.monitor?.updateProfile(self.shortcutProfile)
+            self.coordinator.updateShortcutProfile(self.shortcutProfile)
+            self.settingsWindowController = nil
+            self.startMonitorOrRequestPermissions(promptIfNeeded: false)
+            if self.monitor?.activeTapLocation == nil {
+                self.setStatus("配置已保存；开启所需权限后才能监听快捷键", isError: true)
+            }
+            return .success(())
+        }
+        controller.onOpenPasteTest = { [weak self] in self?.openPasteTest() }
+        settingsWindowController = controller
+        controller.present()
+    }
+
+    private func openPasteTest() {
+        guard coordinator.canBegin else {
+            setStatus("请先完成或取消当前听写，再测试粘贴", isError: true)
+            return
+        }
+        guard AXIsProcessTrusted(),
+              let app = NSWorkspace.shared.runningApplications.first(where: {
+                  $0.bundleIdentifier == Self.uuRemoteBundleIdentifier && !$0.isTerminated
+              }) else {
+            setStatus("请先打开 UU 并确认辅助功能权限", isError: true)
+            return
+        }
+        let target = UURemoteTarget(application: app)
+        guard target.captureFocusedWindow() else {
+            setStatus("无法确认 UU 目标窗口；请先点选远端输入框", isError: true)
+            return
+        }
+        settingsWindowController?.window?.orderOut(nil)
+        coordinator.beginPasteTest(target: target)
+    }
+
+    private func openTextEditForLocalTest() {
+        let textEditPath = "/System/Applications/TextEdit.app"
+        guard FileManager.default.fileExists(atPath: textEditPath) else {
+            setStatus("未找到 TextEdit；请使用任意本机空白文本框测试豆包识别", isError: true)
+            return
+        }
+        NSWorkspace.shared.openApplication(
+            at: URL(fileURLWithPath: textEditPath),
+            configuration: NSWorkspace.OpenConfiguration()
+        ) { [weak self] _, error in
+            DispatchQueue.main.async {
+                if let error {
+                    self?.setStatus("无法打开 TextEdit：\(error.localizedDescription)", isError: true)
+                }
+            }
+        }
+    }
+
+    @objc private func openDoubaoSettings() {
+        guard FileManager.default.fileExists(atPath: DoubaoShortcutSettingsReader.settingsApplicationPath.path) else {
+            setStatus("未找到已安装的豆包设置应用", isError: true)
+            return
+        }
+        NSWorkspace.shared.openApplication(
+            at: DoubaoShortcutSettingsReader.settingsApplicationPath,
+            configuration: NSWorkspace.OpenConfiguration()
+        ) { [weak self] _, error in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                if let error {
+                    self?.setStatus("无法打开豆包设置：\(error.localizedDescription)", isError: true)
+                } else {
+                    self?.refreshDoubaoShortcut(forceStatus: true)
+                    if self?.setupPending == true {
+                        self?.showShortcutSettings()
+                    }
+                }
+            }
+        }
     }
 
     @objc private func openPermissions() {
@@ -190,23 +426,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startMonitorOrRequestPermissions(promptIfNeeded: Bool) {
-        guard let monitor, monitor.activeTapLocation == nil else { return }
-        do {
-            try monitor.start()
-            permissionRetryTimer?.invalidate()
-            permissionRetryTimer = nil
-            setStatus("就绪 · 在 UU 远控中长按左 ⌃", isError: false)
-        } catch {
-            logger.error("Unable to start control monitor: \(error.localizedDescription, privacy: .public)")
-            setStatus("需要开启辅助功能与输入监控权限", isError: true)
-            if promptIfNeeded {
-                requestRequiredPermissions()
-            }
-            if permissionRetryTimer == nil {
-                permissionRetryTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-                    self?.startMonitorOrRequestPermissions(promptIfNeeded: false)
+        guard let monitor else { return }
+        guard !setupPending, let profile = shortcutProfile, profile.isSupported else {
+            setStatus("尚未完成豆包与远控快捷键配置", isError: true)
+            return
+        }
+        if monitor.activeTapLocation == nil {
+            do {
+                try monitor.start()
+            } catch {
+                logger.error("Unable to start control monitor: \(error.localizedDescription, privacy: .public)")
+                setStatus("快捷键已识别；需要开启辅助功能与输入监控权限", isError: true)
+                if promptIfNeeded {
+                    requestRequiredPermissions()
                 }
+                schedulePermissionRetryIfNeeded()
+                return
             }
+        }
+        permissionRetryTimer?.invalidate()
+        permissionRetryTimer = nil
+        guard AXIsProcessTrusted() else {
+            let message = "快捷键监听已启动；需要辅助功能权限才能安全读取 UU 窗口并打开听写框"
+            if statusText != message { setStatus(message, isError: true) }
+            schedulePermissionRetryIfNeeded()
+            return
+        }
+        if let readyStatus = ShortcutTriggerReadiness.status(
+            profile: profile,
+            setupPending: setupPending,
+            monitorActive: monitor.activeTapLocation != nil,
+            accessibilityTrusted: AXIsProcessTrusted()
+        ) {
+            setStatus(readyStatus, isError: false)
+        }
+    }
+
+    private func schedulePermissionRetryIfNeeded() {
+        guard permissionRetryTimer == nil else { return }
+        permissionRetryTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.startMonitorOrRequestPermissions(promptIfNeeded: false)
         }
     }
 
@@ -216,6 +475,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }?.processIdentifier
 
         let center = NSWorkspace.shared.notificationCenter
+        let focusObserver = center.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let bundleIdentifier = (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier
+            self?.monitor?.cancelIfFocusLost(activatedBundleIdentifier: bundleIdentifier)
+        }
+        workspaceObservers.append(focusObserver)
         for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didActivateApplicationNotification] {
             let observer = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
                 guard let self,
@@ -231,6 +499,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             workspaceObservers.append(observer)
         }
+    }
+
+    private func refreshDoubaoShortcut(forceStatus: Bool = false) {
+        guard monitor?.isGestureIdle != false, coordinator.canBegin else { return }
+        let oldProfile = shortcutProfile
+        refreshResolvedProfile()
+        coordinator.updateShortcutProfile(shortcutProfile)
+        guard !hasSameShortcutBehavior(shortcutProfile, oldProfile) else {
+            if forceStatus {
+                setStatus(shortcutProfile?.doubao.sourceAndTime ?? "没有可确认的豆包快捷键配置", isError: shortcutProfile == nil)
+            }
+            return
+        }
+
+        monitor?.updateProfile(shortcutProfile)
+        if shortcutProfile?.isSupported == true, !setupPending {
+            startMonitorOrRequestPermissions(promptIfNeeded: false)
+        } else if shortcutProfile == nil {
+            monitor?.stop()
+            permissionRetryTimer?.invalidate()
+            permissionRetryTimer = nil
+            setStatus("没有可确认的豆包快捷键；请打开设置并手动选择", isError: true)
+        }
+    }
+
+    private func refreshResolvedProfile() {
+        let automatic = DoubaoShortcutSettingsReader.discover()
+        let manual = shortcutStore.loadManualDoubaoConfiguration()
+        if manual == nil, let automatic, automatic.mode.isSupported {
+            shortcutStore.updateConfirmedModeFromAutomaticRead(automatic.mode)
+        }
+        let fallback = DoubaoShortcutSettingsReader.hasVisibleSettingsWindow()
+            ? nil
+            : shortcutStore.loadLastConfirmedDoubaoConfiguration()
+        shortcutConfiguration = manual ?? automatic ?? fallback
+        bridgeShortcutConfiguration = shortcutStore.loadBridgeConfiguration() ?? .followDoubao
+        if let shortcutConfiguration {
+            let profile = ShortcutProfile(doubao: shortcutConfiguration, bridge: bridgeShortcutConfiguration)
+            shortcutProfile = profile.isSupported ? profile : nil
+        } else {
+            shortcutProfile = nil
+        }
+    }
+
+    private func hasSameShortcutBehavior(
+        _ first: ShortcutProfile?,
+        _ second: ShortcutProfile?
+    ) -> Bool {
+        ShortcutProfile.hasSameTriggerBehavior(first, second)
     }
 
     private func observeEventTapChanges() {
