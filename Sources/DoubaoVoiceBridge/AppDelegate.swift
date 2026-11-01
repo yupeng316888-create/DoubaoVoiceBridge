@@ -28,10 +28,12 @@ enum LatencyDefaultsMigration {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static let uuRemoteBundleIdentifier = "com.netease.uuremote"
+    static let doubaoIMEBundleIdentifier = "com.bytedance.inputmethod.doubaoime"
     private static let latencyDefaultsMigrationKey = "didMigrateLatencyDefaultsV23"
 
     private let logger = Logger(subsystem: "com.lyp.DoubaoVoiceBridge", category: "app")
     private let coordinator = SessionCoordinator()
+    private let screenshots = ScreenshotCoordinator()
     private var monitor: ControlHoldMonitor?
     private var statusItem: NSStatusItem?
     private var statusText = "正在启动…"
@@ -62,7 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let monitor = ControlHoldMonitor(
             holdThreshold: UserDefaults.standard.double(forKey: "controlHoldThreshold"),
             targetProvider: { [weak self] in
-                guard let self, self.coordinator.canBegin else { return nil }
+                guard let self, self.coordinator.canBegin, !self.screenshots.isBusy else { return nil }
                 return self.currentUURemoteTarget()
             },
             localComposerReady: { [weak self] in
@@ -76,11 +78,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observeUURemoteLifecycle()
         observeEventTapChanges()
         startMonitorOrRequestPermissions(promptIfNeeded: true)
+        screenshots.canStart = { [weak self] in
+            guard let self else { return false }
+            return self.coordinator.state == .idle && self.monitor?.isGestureIdle == true
+        }
+        screenshots.onStatusChange = { [weak self] text, error in self?.setStatus(text, isError: error) }
+        screenshots.start()
+        if !UserDefaults.standard.bool(forKey: "didShowScreenshotV24") {
+            UserDefaults.standard.set(true, forKey: "didShowScreenshotV24")
+            screenshots.showTools()
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        screenshots.showTools()
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         monitor?.stop()
         coordinator.prepareForTermination()
+        screenshots.prepareForTermination()
         permissionRetryTimer?.invalidate()
         tapOrderAuditWorkItem?.cancel()
         tapOrderAuditTimer?.invalidate()
@@ -147,6 +165,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         permissions.target = self
         menu.addItem(permissions)
 
+        menu.addItem(.separator())
+        let capture = NSMenuItem(title: "截图并粘贴到远端（⌥⇧S）", action: #selector(ScreenshotCoordinator.beginCapture), keyEquivalent: "")
+        capture.target = screenshots
+        menu.addItem(capture)
+        let tools = NSMenuItem(title: "打开截图工具…", action: #selector(ScreenshotCoordinator.showTools), keyEquivalent: "")
+        tools.target = screenshots
+        menu.addItem(tools)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "退出远控听写", action: #selector(quitApplication), keyEquivalent: "q")
         quit.target = self
@@ -220,7 +245,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let observer = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
                 guard let self,
                       let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                      application.bundleIdentifier == Self.uuRemoteBundleIdentifier else { return }
+                      [Self.uuRemoteBundleIdentifier, Self.doubaoIMEBundleIdentifier].contains(application.bundleIdentifier ?? "") else { return }
+                if application.bundleIdentifier == Self.doubaoIMEBundleIdentifier {
+                    self.scheduleTapOrderAudit(after: 0.25)
+                    return
+                }
                 let pid = application.processIdentifier
                 let delay = UURemoteActivationAudit.delay(
                     previousPID: self.observedUURemotePID,
@@ -272,7 +301,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard UURemoteTapOrder.needsReinstall(
             taps: taps,
             bridgePID: bridgePID,
-            uuRemotePID: uuRemote.processIdentifier
+            uuRemotePID: uuRemote.processIdentifier,
+            inputMethodPID: NSWorkspace.shared.runningApplications.first {
+                $0.bundleIdentifier == Self.doubaoIMEBundleIdentifier && !$0.isTerminated
+            }?.processIdentifier
         ) else { return }
 
         let now = Date()
@@ -282,7 +314,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         tapReinstallTimes.append(now)
-        logger.notice("UU keyboard tap moved ahead; reinstalling local head tap")
+        logger.notice("UU or Doubao keyboard tap moved ahead; reinstalling local head tap")
         monitor.stop()
         startMonitorOrRequestPermissions(promptIfNeeded: false)
     }
@@ -353,7 +385,8 @@ enum UURemoteTapOrder {
     static func needsReinstall(
         taps: [InstalledEventTap],
         bridgePID: pid_t,
-        uuRemotePID: pid_t
+        uuRemotePID: pid_t,
+        inputMethodPID: pid_t? = nil
     ) -> Bool {
         let relevant = taps.enumerated().filter { _, tap in
             tap.isEnabled &&
@@ -361,13 +394,16 @@ enum UURemoteTapOrder {
                 tap.options == CGEventTapOptions.defaultTap.rawValue &&
                 (tap.eventMask & keyboardMask) != 0
         }
-        guard let uuIndex = relevant.first(where: { $0.element.processIdentifier == uuRemotePID })?.offset else {
+        guard let otherIndex = relevant.first(where: {
+            $0.element.processIdentifier == uuRemotePID ||
+                $0.element.processIdentifier == inputMethodPID
+        })?.offset else {
             return false
         }
         guard let bridgeIndex = relevant.first(where: { $0.element.processIdentifier == bridgePID })?.offset else {
             return true
         }
-        return uuIndex < bridgeIndex
+        return otherIndex < bridgeIndex
     }
 }
 

@@ -72,6 +72,21 @@ enum SelfTests {
                 false,
                 "bridge tap ahead stays installed"
             )
+            let ime = InstalledEventTap(processIdentifier: 300, location: 0,
+                options: 0, eventMask: flagsMask, isEnabled: true)
+            check(UURemoteTapOrder.needsReinstall(taps: [ime, bridge],
+                bridgePID: 200, uuRemotePID: 100, inputMethodPID: 300), true,
+                "restarted Doubao ahead must rearm even without a UU tap")
+            check(UURemoteTapOrder.needsReinstall(taps: [bridge, ime],
+                bridgePID: 200, uuRemotePID: 100, inputMethodPID: 300), false,
+                "stable Doubao ordering must not reinstall repeatedly")
+            let listener = InstalledEventTap(processIdentifier: 300, location: 0,
+                options: 1, eventMask: flagsMask, isEnabled: true)
+            let disabled = InstalledEventTap(processIdentifier: 300, location: 0,
+                options: 0, eventMask: flagsMask, isEnabled: false)
+            check(UURemoteTapOrder.needsReinstall(taps: [listener, disabled, bridge],
+                bridgePID: 200, uuRemotePID: 100, inputMethodPID: 300), false,
+                "passive or disabled listeners cannot steal Control")
             check(
                 UURemoteActivationAudit.delay(previousPID: 100, activatedPID: 100),
                 0.25,
@@ -86,15 +101,31 @@ enum SelfTests {
 
         do {
             check(
-                SyntheticControlRoute.localSessionDictation.eventTapLocation.rawValue,
-                CGEventTapLocation.cgSessionEventTap.rawValue,
-                "local dictation bypasses UU HID tap"
+                SyntheticControlRoute.localHIDDictation.eventTapLocation.rawValue,
+                CGEventTapLocation.cghidEventTap.rawValue,
+                "local dictation reaches Doubao HID listener"
             )
             check(
                 SyntheticControlRoute.remoteHIDPassthrough.eventTapLocation.rawValue,
                 CGEventTapLocation.cghidEventTap.rawValue,
                 "remote Control chords stay on HID path"
             )
+        }
+
+        do {
+            if let down = ControlHoldMonitor.makeControlEvent(down: true, rightControlHeld: false),
+               let up = ControlHoldMonitor.makeControlEvent(down: false, rightControlHeld: false),
+               let rightHeld = ControlHoldMonitor.makeControlEvent(down: false, rightControlHeld: true) {
+                check(down.type, .flagsChanged, "Control uses modifier event type")
+                check(down.getIntegerValueField(.keyboardEventKeycode), 59, "left Control keycode")
+                check(down.flags.contains(.maskControl), true, "Control down sets general flag")
+                check(down.flags.rawValue & 1, 1, "Control down includes left device flag")
+                check(up.flags.rawValue & 1, 0, "Control up clears left device flag")
+                check(up.flags.contains(.maskControl), false, "Control up clears general flag")
+                check(rightHeld.flags.contains(.maskControl), true, "right Control remains held")
+                check(down.getIntegerValueField(.eventSourceUserData),
+                    ControlHoldMonitor.syntheticEventMarker, "synthetic Control bypasses own interception")
+            } else { failures.append("Unable to construct Control events") }
         }
 
         do {
@@ -246,8 +277,17 @@ enum SelfTests {
             )
         }
 
+        do {
+            check(ScreenshotPolicy.canPaste(sameClipboard: true, sameProcess: true, sameWindow: true), true, "image delivery stable target")
+            check(ScreenshotPolicy.canPaste(sameClipboard: false, sameProcess: true, sameWindow: true), false, "user copy cancels image paste")
+            check(ScreenshotPolicy.canPaste(sameClipboard: true, sameProcess: true, sameWindow: false), false, "focus change cancels image paste")
+            check(ScreenshotPolicy.canPaste(sameClipboard: true, sameProcess: false, sameWindow: true), false, "closed UU cancels image paste")
+            check(ScreenshotPolicy.syncDelay(bytes: 0), 10, "minimum image sync window")
+            check(ScreenshotPolicy.syncDelay(bytes: 20 * 1024 * 1024), 15, "bounded image sync window")
+        }
+
         if failures.isEmpty {
-            print("SELF_TEST_OK tests=10")
+            print("SELF_TEST_OK groups=12 (voice regression + image focus/clipboard guards)")
             return true
         }
         for failure in failures {

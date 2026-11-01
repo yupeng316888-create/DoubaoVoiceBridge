@@ -241,7 +241,7 @@ final class ControlHoldMonitor {
             return
         }
         logger.notice("Local composer is key and ready for Doubao voice input method")
-        let route = SyntheticControlRoute.localSessionDictation
+        let route = SyntheticControlRoute.localHIDDictation
         guard postSyntheticControl(down: true, route: route) else {
             logger.error("Unable to create synthetic local Control down")
             onCancel()
@@ -251,7 +251,7 @@ final class ControlHoldMonitor {
         syntheticDownPosted = true
         syntheticDownAt = Date()
         syntheticRoute = route
-        logger.notice("Synthetic local Control down posted at session tap")
+        logger.notice("Synthetic local Control down posted at HID tap for Doubao")
     }
 
     private func scheduleSyntheticDownCheck(after delay: TimeInterval) {
@@ -315,24 +315,27 @@ final class ControlHoldMonitor {
         if notifyCancel && wasDictating { onCancel() }
     }
 
+    static func makeControlEvent(down: Bool, rightControlHeld: Bool) -> CGEvent? {
+        guard let source = CGEventSource(stateID: .combinedSessionState),
+              let event = CGEvent(keyboardEventSource: source,
+                  virtualKey: CGKeyCode(leftControlKeyCode), keyDown: down) else { return nil }
+        // The keyboard constructor includes the left-device modifier bit.
+        // A generic flagsChanged event with only maskControl is insufficient
+        // for listeners that distinguish left Control from right Control.
+        event.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
+        if !down && rightControlHeld { event.flags.insert(.maskControl) }
+        return event
+    }
+
     @discardableResult
     private func postSyntheticControl(
         down: Bool,
         route: SyntheticControlRoute,
         proxy: CGEventTapProxy? = nil
     ) -> Bool {
-        guard let source = CGEventSource(stateID: .combinedSessionState),
-              let event = CGEvent(source: source) else { return false }
-        event.type = .flagsChanged
-        event.setIntegerValueField(.keyboardEventKeycode, value: Self.leftControlKeyCode)
-        event.setIntegerValueField(.eventSourceUserData, value: Self.syntheticEventMarker)
-        var flags = CGEventSource.flagsState(.combinedSessionState)
-        if down {
-            flags.insert(.maskControl)
-        } else if !physicalRightControlIsDown {
-            flags.remove(.maskControl)
-        }
-        event.flags = flags
+        guard let event = Self.makeControlEvent(
+            down: down, rightControlHeld: physicalRightControlIsDown
+        ) else { return false }
         if route == .remoteHIDPassthrough, let proxy {
             event.tapPostEvent(proxy)
         } else {
@@ -344,14 +347,16 @@ final class ControlHoldMonitor {
 
 enum SyntheticControlRoute: Equatable {
     case remoteHIDPassthrough
-    case localSessionDictation
+    case localHIDDictation
 
     var eventTapLocation: CGEventTapLocation {
         switch self {
         case .remoteHIDPassthrough:
             return .cghidEventTap
-        case .localSessionDictation:
-            return .cgSessionEventTap
+        case .localHIDDictation:
+            // Doubao 1.0.3 listens at HID, before the session event stream.
+            // The caller has already verified that the local composer owns focus.
+            return .cghidEventTap
         }
     }
 }
