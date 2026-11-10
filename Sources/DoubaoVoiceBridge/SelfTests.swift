@@ -286,8 +286,10 @@ enum SelfTests {
             check(ScreenshotPolicy.syncDelay(bytes: 20 * 1024 * 1024), 15, "bounded image sync window")
         }
 
+        failures.append(contentsOf: ClipboardImageReaderTests.run())
+
         if failures.isEmpty {
-            print("SELF_TEST_OK groups=12 (voice regression + image focus/clipboard guards)")
+            print("SELF_TEST_OK groups=13 (voice regression + image guards + Finder image files)")
             return true
         }
         for failure in failures {

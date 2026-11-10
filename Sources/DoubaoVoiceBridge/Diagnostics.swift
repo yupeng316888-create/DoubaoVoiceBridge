@@ -18,6 +18,19 @@ enum Diagnostics {
         Unmanaged.passUnretained(event)
     }
 
+    static func checkClipboardImage() -> Bool {
+        do {
+            let png = try ClipboardImageReader.png(from: .general)
+            let image = NSBitmapImageRep(data: png)
+            let canBackup = PasteboardSnapshot.capture(from: .general) != nil
+            print("clipboard_image=readable png_bytes=\(png.count) width=\(image?.pixelsWide ?? 0) height=\(image?.pixelsHigh ?? 0) backup=\(canBackup)")
+            return canBackup
+        } catch {
+            print("clipboard_image_error=\(error.localizedDescription)")
+            return false
+        }
+    }
+
     static func printReport() {
         let workspace = NSWorkspace.shared
         let uuRemote = workspace.runningApplications.first {

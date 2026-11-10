@@ -76,6 +76,7 @@ final class ScreenshotCoordinator: NSObject {
     private(set) var isBusy = false
     private let logger = Logger(subsystem: "com.lyp.DoubaoVoiceBridge", category: "screenshot")
     private var hotKey: EventHotKeyRef?
+    private var pasteHotKey: EventHotKeyRef?
     private var handler: EventHandlerRef?
     private var captureProcess: Process?
     private var capturedPNG: Data?
@@ -87,11 +88,19 @@ final class ScreenshotCoordinator: NSObject {
 
     func start() {
         var type = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        let result = InstallEventHandler(GetApplicationEventTarget(), { _, _, data in
+        let result = InstallEventHandler(GetApplicationEventTarget(), { _, event, data in
             guard let data else { return noErr }
             let owner = Unmanaged<ScreenshotCoordinator>.fromOpaque(data).takeUnretainedValue()
-            owner.logger.notice("Screenshot shortcut received")
-            DispatchQueue.main.async { owner.beginCapture() }
+            guard let event else { return noErr }
+            var id = EventHotKeyID()
+            guard GetEventParameter(event, EventParamName(kEventParamDirectObject),
+                EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size,
+                nil, &id) == noErr else { return noErr }
+            let isPaste = id.id == 3
+            owner.logger.notice("Image shortcut received paste=\(isPaste)")
+            DispatchQueue.main.async {
+                if isPaste { owner.pasteClipboardImage() } else { owner.beginCapture() }
+            }
             return noErr
         }, 1, &type, Unmanaged.passUnretained(self).toOpaque(), &handler)
         guard result == noErr else { report("截图快捷键注册失败，可从菜单打开。", error: true); return }
@@ -100,11 +109,16 @@ final class ScreenshotCoordinator: NSObject {
                                         GetApplicationEventTarget(), 0, &hotKey)
         if status != noErr { report("⌥⇧S 已被占用，可使用菜单中的截图按钮。", error: true) }
         logger.notice("Screenshot shortcut registration status=\(status)")
+        let pasteStatus = RegisterEventHotKey(UInt32(kVK_ANSI_V), UInt32(optionKey | shiftKey),
+            EventHotKeyID(signature: 0x44564253, id: 3), GetApplicationEventTarget(), 0, &pasteHotKey)
+        if pasteStatus != noErr { report("⌥⇧V 已被占用，可使用菜单中的图片粘贴按钮。", error: true) }
+        logger.notice("Clipboard image shortcut registration status=\(pasteStatus)")
     }
     func prepareForTermination() {
         captureProcess?.terminate()
         restoreClipboardIfUnchanged()
         if let hotKey { UnregisterEventHotKey(hotKey) }
+        if let pasteHotKey { UnregisterEventHotKey(pasteHotKey) }
         if let handler { RemoveEventHandler(handler) }
     }
     private func report(_ message: String, error: Bool = false) {
@@ -115,19 +129,19 @@ final class ScreenshotCoordinator: NSObject {
     }
     @objc func showTools() {
         if panel == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 550, height: 255),
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 550, height: 280),
                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "远控截图"
             window.isReleasedWhenClosed = false
             let title = NSTextField(labelWithString: "截图后粘贴到另一台 Mac · 不自动发送")
             title.font = .systemFont(ofSize: 17, weight: .semibold)
-            let help = NSTextField(wrappingLabelWithString: "先在 UU 远端选好输入框，再回到本机。按 ⌥⇧S 框选截图，松开鼠标后自动粘贴；Esc 取消。左 Control 语音输入保持原样。")
+            let help = NSTextField(wrappingLabelWithString: "先在 UU 远端选好输入框。⌥⇧S 框选截图；访达复制一张图片文件后按 ⌥⇧V 传图。等待 10–15 秒，均只粘贴、不发送。左 Control 仍用于语音。")
             let state = NSTextField(wrappingLabelWithString: status)
             state.font = .systemFont(ofSize: 12)
             state.textColor = .secondaryLabelColor
             statusLabel = state
             let capture = NSButton(title: "开始截图（⌥⇧S）", target: self, action: #selector(beginCapture))
-            let clipboard = NSButton(title: "粘贴剪贴板中的图片", target: self, action: #selector(pasteClipboardImage))
+            let clipboard = NSButton(title: "粘贴复制的图片／图片文件（⌥⇧V）", target: self, action: #selector(pasteClipboardImage))
             let retry = NSButton(title: "重新粘贴上一张截图", target: self, action: #selector(retryLastImage))
             let stack = NSStackView(views: [title, help, capture, clipboard, retry, state])
             stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 12
@@ -215,12 +229,23 @@ final class ScreenshotCoordinator: NSObject {
     }
     @objc func pasteClipboardImage() {
         guard let target = acquireDestination() else { return }
-        let p = NSPasteboard.general
-        let png = p.data(forType: .png) ?? p.data(forType: .tiff).flatMap {
-            NSBitmapImageRep(data: $0)?.representation(using: .png, properties: [:])
+        // Reading/converting happens before taking ownership of the clipboard.
+        // A failure leaves the user's copied files intact.
+        do {
+            let generation = NSPasteboard.general.changeCount
+            let png = try ClipboardImageReader.png(from: .general)
+            guard NSPasteboard.general.changeCount == generation else {
+                report("读取期间剪贴板已变化，本次没有覆盖；请重新复制图片后重试。", error: true)
+                showTools()
+                return
+            }
+            isBusy = true
+            deliver(png, to: target)
+        } catch {
+            report(error.localizedDescription, error: true)
+            logger.notice("Clipboard image could not be read")
+            showTools()
         }
-        guard let png else { report("剪贴板中没有图片。", error: true); return }
-        isBusy = true; deliver(png, to: target)
     }
     @objc func retryLastImage() {
         guard let target = acquireDestination() else { return }

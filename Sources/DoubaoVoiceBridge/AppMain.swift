@@ -7,6 +7,9 @@ enum DoubaoVoiceBridgeMain {
             Diagnostics.printReport()
             return
         }
+        if CommandLine.arguments.contains("--check-clipboard-image") {
+            exit(Diagnostics.checkClipboardImage() ? EXIT_SUCCESS : EXIT_FAILURE)
+        }
         if CommandLine.arguments.contains("--self-test") {
             exit(SelfTests.run() ? EXIT_SUCCESS : EXIT_FAILURE)
         }

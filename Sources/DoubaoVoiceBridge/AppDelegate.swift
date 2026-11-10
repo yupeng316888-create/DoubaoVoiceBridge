@@ -169,6 +169,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let capture = NSMenuItem(title: "截图并粘贴到远端（⌥⇧S）", action: #selector(ScreenshotCoordinator.beginCapture), keyEquivalent: "")
         capture.target = screenshots
         menu.addItem(capture)
+        let pasteImage = NSMenuItem(title: "粘贴复制的图片／图片文件（⌥⇧V）", action: #selector(ScreenshotCoordinator.pasteClipboardImage), keyEquivalent: "")
+        pasteImage.target = screenshots
+        menu.addItem(pasteImage)
         let tools = NSMenuItem(title: "打开截图工具…", action: #selector(ScreenshotCoordinator.showTools), keyEquivalent: "")
         tools.target = screenshots
         menu.addItem(tools)
