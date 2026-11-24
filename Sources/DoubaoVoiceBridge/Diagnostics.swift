@@ -51,6 +51,7 @@ enum Diagnostics {
         let values: [(String, String)] = [
             ("bundle", Bundle.main.bundleIdentifier ?? "unknown"),
             ("version", Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"),
+            ("local_voice_key", AppDelegate.configuredLocalVoiceKey.rawValue),
             ("accessibility", AXIsProcessTrusted() ? "granted" : "missing"),
             ("input_monitoring", CGPreflightListenEventAccess() ? "granted" : "missing"),
             ("hid_event_tap", probeTap == nil ? "unavailable" : "available"),

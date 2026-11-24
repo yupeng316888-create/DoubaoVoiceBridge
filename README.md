@@ -10,15 +10,28 @@
 
 ## 下载与安装
 
-在 [Releases](https://github.com/yupeng316888-create/DoubaoVoiceBridge/releases) 下载应用压缩包，解压后将“远控听写.app”放入“应用程序”目录，再打开。
+在 [最新版本](https://github.com/yupeng316888-create/DoubaoVoiceBridge/releases/latest) 下载 `DoubaoVoiceBridge-v2.4.8-universal.zip`。更新前先从菜单栏退出旧版“远控听写”，解压后用新版替换“应用程序”中的同名应用。
 
-v2.4.1 提供包含 Apple Silicon 和 Intel 架构的通用应用。当前真实远控验收在 Apple Silicon Mac mini 上完成；Intel 已完成构建验证，尚未在 Intel 硬件上实测。应用采用 ad-hoc 签名，未使用 Apple Developer ID 签名，也未经过公证。
+### 远控语音没有出字，或松手后一直等待
+
+以下是两台 Mac mini 上已验证的配置。只需在插着麦克风、运行 UU 控制端的 Mac 上做一次。
+
+1. 打开豆包输入法设置 → 语音输入，确认「免按模式」已开启，快捷键为**右 Option**。本机日常使用的「长按模式」可以继续沿用。
+2. 退出“远控听写”，在终端执行下面这行，为远控工具选用豆包的免按模式。
+
+   ```sh
+   defaults write com.lyp.DoubaoVoiceBridge localVoiceKey -string rightOptionTap
+   ```
+
+3. 打开新版“远控听写”，在 UU 里点一下远端输入框，按住**左 Control** 说话，松开后文字会粘贴到该输入框。
+
+v2.4.8 是 Apple Silicon 和 Intel 通用应用。语音修复已在 Apple Silicon Mac mini 实机验证。Intel 已验证构建，仍待实机验证。应用采用 ad-hoc 签名，未经过 Apple 公证。
 
 ### 运行要求与权限
 
 - macOS 13 或更高版本；MacBook、Mac mini 均可作为控制端。
 - 两台 Mac 已通过 UU 远程连接，且可以同步剪贴板。
-- 语音功能需要豆包语音输入法，语音快捷键设为左 `Control`，本机有可用麦克风。
+- 语音功能需要豆包输入法和本机麦克风。UU 里的触发键是左 `Control`，本机的豆包长按键支持左 `Control`、`Fn` 和右 `Command`。
 - 远端输入框必须支持对应内容；图片粘贴需要支持图片附件的编辑器。
 
 在“系统设置 → 隐私与安全性”中为**远控听写**开启：
@@ -40,6 +53,10 @@ v2.4.1 提供包含 Apple Silicon 和 Intel 架构的通用应用。当前真实
 3. 松开按键。工具等待豆包提交最终文字，再通过 UU 粘贴到原远控窗口。
 
 只有 UU 在前台且左 Control 持续按住超过阈值时才进入听写。快速的 `Control-C` 等组合键仍保持原行为。
+
+要分开两种用途，在豆包设置的「语音输入 → 长按模式」选 Fn，然后执行 `defaults write com.lyp.DoubaoVoiceBridge localVoiceKey -string fn` 并重新打开远控听写。这样本机长按 Fn 说话，UU 窗口内长按左 Control 说话。实体键盘需要能向 macOS 上报独立的 Fn 键，才能在本机直接用 Fn。
+
+如果本机豆包已设为右 Command，只需执行 `defaults write com.lyp.DoubaoVoiceBridge localVoiceKey -string rightCommand` 并重新打开远控听写。
 
 ## 截图输入
 
@@ -85,7 +102,7 @@ v2.4.1 提供包含 Apple Silicon 和 Intel 架构的通用应用。当前真实
 - 语音沿用原有剪贴板恢复行为；截图成功后保留最新图片，取消或失败时仅在仍持有原剪贴板代数的情况下恢复备份。
 - 不保存听写正文，不内置账号、远端地址或网络上传接口。语音服务和跨设备传输分别由豆包输入法及 UU 远程负责；粘贴图片后，目标应用自身可能按其规则上传附件。
 
-UU 通过 Bundle ID `com.netease.uuremote` 识别。应用标识、输入法快捷键或相关软件行为变化时，可能需要适配。当前版本保留左 Control 语音方式，没有引入自定义语音快捷键。
+UU 通过 Bundle ID `com.netease.uuremote` 识别。远控工具选用的豆包快捷键须与相应的「免按模式」或「长按模式」设置一致。
 
 ## 从源码构建
 

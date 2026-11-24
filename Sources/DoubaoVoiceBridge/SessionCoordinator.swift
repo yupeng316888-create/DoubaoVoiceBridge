@@ -10,10 +10,18 @@ final class SessionCoordinator {
     }
 
     var onStatusChange: ((String, Bool) -> Void)?
+    var onListeningEnded: (() -> Void)?
+    var physicalHoldOwnsRelease: (() -> Bool)?
 
-    private let panel = ComposerPanelController()
+    private lazy var panel = makePanel()
     private let delivery = UURemoteDelivery()
-    private(set) var state: State = .idle
+    private(set) var state: State = .idle {
+        didSet {
+            // A panel release, Return, or Esc can finish listening even if the
+            // global keyboard tap never received the physical Control release.
+            if oldValue == .listening && state != .listening { onListeningEnded?() }
+        }
+    }
     private var target: UURemoteTarget?
     private var deliveryAwaitingCleanup = false
 
@@ -25,11 +33,18 @@ final class SessionCoordinator {
         state == .listening && panel.isReadyForLocalDictation
     }
 
-    init() {
+    var canRestartInEmptyComposer: Bool { isLocalComposerReady && !panel.hasInput }
+
+    private func makePanel() -> ComposerPanelController {
+        let panel = ComposerPanelController()
         panel.onCommit = { [weak self] text in self?.send(text: text) }
         panel.onCancel = { [weak self] in self?.cancel() }
-        panel.onControlReleased = { [weak self] in self?.controlReleased() }
+        panel.onControlReleased = { [weak self] in
+            guard let self, self.physicalHoldOwnsRelease?() != true else { return }
+            self.controlReleased()
+        }
         panel.onTranscriptTimeout = { [weak self] in self?.handleTranscriptTimeout() }
+        return panel
     }
 
     func begin(target: UURemoteTarget) {
@@ -50,13 +65,13 @@ final class SessionCoordinator {
         onStatusChange?("正在完成识别…", false)
     }
 
-    func cancel() {
+    func cancel(restoreTargetFocus: Bool = true) {
         guard state != .idle, state != .delivering else { return }
         let target = self.target
         self.target = nil
         state = .idle
         panel.hide()
-        target?.activateOriginalWindow()
+        if restoreTargetFocus { target?.activateOriginalWindow() }
         onStatusChange?("就绪 · 在 UU 远控中长按左 ⌃", false)
     }
 
@@ -103,13 +118,18 @@ final class SessionCoordinator {
     }
 
     private func handleTranscriptTimeout() {
-        state = .failed
-        if panel.currentText().isEmpty {
-            panel.showError("没有识别到文字。按 Esc 返回 UU 后可重试")
-            onStatusChange?("没有识别到文字，请重试", true)
-        } else {
-            panel.showError("豆包语音输入法尚未完成识别，确认文字后按回车发送，或按 Esc 取消")
-            onStatusChange?("识别超时，等待手动确认", true)
+        guard state == .finalizing else { return }
+        if !panel.hasInput {
+            let restoreFocus = NSApp.isActive && panel.window?.isKeyWindow == true
+                && target?.stillMatchesFocusedWindow() == true
+            panel.retireEmptySession()
+            cancel(restoreTargetFocus: restoreFocus)
+            panel = makePanel()
+            onStatusChange?("本次没有识别到文字，可在 UU 中重新长按左 ⌃", true)
+            return
         }
+        state = .failed
+        panel.showError("豆包语音输入法尚未完成识别，确认文字后按回车发送，或按 Esc 取消")
+        onStatusChange?("识别超时，等待手动确认", true)
     }
 }

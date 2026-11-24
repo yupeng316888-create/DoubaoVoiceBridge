@@ -44,7 +44,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var eventTapNotificationTokens: [Int32] = []
     private var tapOrderAuditWorkItem: DispatchWorkItem?
     private var tapOrderAuditTimer: Timer?
-    private var tapReinstallTimes: [Date] = []
+    private var tapOrderRecovery = TapOrderRecovery()
+    static var configuredLocalVoiceKey: LocalVoiceKey {
+        let name = UserDefaults.standard.string(forKey: "localVoiceKey") ?? ""
+        return LocalVoiceKey(rawValue: name) ?? .leftControl
+    }
+    private let localVoiceKey = AppDelegate.configuredLocalVoiceKey
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UserDefaults.standard.register(defaults: [
@@ -63,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let monitor = ControlHoldMonitor(
             holdThreshold: UserDefaults.standard.double(forKey: "controlHoldThreshold"),
+            localVoiceKey: localVoiceKey,
             targetProvider: { [weak self] in
                 guard let self, self.coordinator.canBegin, !self.screenshots.isBusy else { return nil }
                 return self.currentUURemoteTarget()
@@ -75,6 +81,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onCancel: { [weak self] in self?.coordinator.cancel() }
         )
         self.monitor = monitor
+        monitor.localComposerReadyForRestart = { [weak self] in self?.coordinator.canRestartInEmptyComposer == true }
+        coordinator.physicalHoldOwnsRelease = { [weak monitor] in monitor?.ownsPhysicalFallbackRelease == true }
+        monitor.onFallbackAbandoned = { [weak self] in self?.coordinator.cancel(restoreTargetFocus: false) }
+        coordinator.onListeningEnded = { [weak monitor] in monitor?.resetAfterSessionEnd() }
         observeUURemoteLifecycle()
         observeEventTapChanges()
         startMonitorOrRequestPermissions(promptIfNeeded: true)
@@ -300,24 +310,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               }) else { return }
 
         let taps = Self.installedEventTaps()
-        let bridgePID = ProcessInfo.processInfo.processIdentifier
-        guard UURemoteTapOrder.needsReinstall(
+        guard !taps.isEmpty else { return }
+        let inputMethodPID = NSWorkspace.shared.runningApplications.first {
+            $0.bundleIdentifier == Self.doubaoIMEBundleIdentifier && !$0.isTerminated
+        }?.processIdentifier
+        let needsReinstall = UURemoteTapOrder.needsReinstall(
             taps: taps,
-            bridgePID: bridgePID,
+            bridgePID: ProcessInfo.processInfo.processIdentifier,
             uuRemotePID: uuRemote.processIdentifier,
-            inputMethodPID: NSWorkspace.shared.runningApplications.first {
-                $0.bundleIdentifier == Self.doubaoIMEBundleIdentifier && !$0.isTerminated
-            }?.processIdentifier
+            inputMethodPID: localVoiceKey == .leftControl ? inputMethodPID : nil
+        )
+        guard tapOrderRecovery.shouldReinstall(
+            needsReinstall: needsReinstall,
+            uuPID: uuRemote.processIdentifier,
+            inputMethodPID: inputMethodPID,
+            now: ProcessInfo.processInfo.systemUptime
         ) else { return }
-
-        let now = Date()
-        tapReinstallTimes.removeAll { now.timeIntervalSince($0) > 5.0 }
-        guard tapReinstallTimes.count < 3 else {
-            logger.error("Tap-order contention detected; deferring to the low-frequency audit")
-            return
-        }
-        tapReinstallTimes.append(now)
-        logger.notice("UU or Doubao keyboard tap moved ahead; reinstalling local head tap")
+        logger.notice("Reinstalling local Control tap after keyboard tap order change (attempt \(self.tapOrderRecovery.attempts, privacy: .public))")
         monitor.stop()
         startMonitorOrRequestPermissions(promptIfNeeded: false)
     }
@@ -341,6 +350,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quitApplication() {
         NSApp.terminate(nil)
+    }
+}
+
+// Some input methods create another HID tap each time we move ahead.
+// After one retry, probe at most once in 90 seconds while contention persists.
+struct TapOrderRecovery {
+    private(set) var attempts = 0
+    private var uuPID: pid_t?
+    private var inputMethodPID: pid_t?
+    private var earliestRetry: TimeInterval = 0
+    private var healthySince: TimeInterval?
+
+    mutating func shouldReinstall(
+        needsReinstall: Bool, uuPID: pid_t, inputMethodPID: pid_t?, now: TimeInterval
+    ) -> Bool {
+        if self.uuPID != uuPID || self.inputMethodPID != inputMethodPID {
+            self = TapOrderRecovery()
+            self.uuPID = uuPID
+            self.inputMethodPID = inputMethodPID
+        }
+        guard needsReinstall else {
+            if let healthySince {
+                if now - healthySince >= 30 {
+                    attempts = 0
+                    earliestRetry = 0
+                }
+            } else {
+                healthySince = now
+            }
+            return false
+        }
+        healthySince = nil
+        guard now >= earliestRetry else { return false }
+        attempts += 1
+        earliestRetry = now + (attempts == 1 ? 5 : 90)
+        return true
     }
 }
 

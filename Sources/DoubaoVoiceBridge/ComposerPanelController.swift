@@ -12,6 +12,10 @@ final class ComposerTextView: NSTextView {
     var onControlReleased: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
+        if let cgEvent = event.cgEvent,
+           LocalVoiceKey.rightOptionTap.filtersEvent(type: .keyDown, event: cgEvent) {
+            return
+        }
         let isReturn = event.keyCode == 36 || event.keyCode == 76
         let disallowedModifiers: NSEvent.ModifierFlags = [.command, .control, .option]
         if isReturn,
@@ -29,7 +33,8 @@ final class ComposerTextView: NSTextView {
 
     override func flagsChanged(with event: NSEvent) {
         super.flagsChanged(with: event)
-        if event.keyCode == 59, !event.modifierFlags.contains(.control) {
+        if event.keyCode == 59, !event.modifierFlags.contains(.control),
+           event.cgEvent?.getIntegerValueField(.eventSourceUserData) != ControlHoldMonitor.syntheticEventMarker {
             onControlReleased?()
         }
     }
@@ -190,6 +195,20 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
 
     func currentText() -> String {
         textView.string
+    }
+
+    var hasInput: Bool { !textView.string.isEmpty || textView.hasMarkedText() }
+
+    func retireEmptySession() {
+        // A late IME callback still belongs to this input client, never to
+        // the fresh text view used for the next hold.
+        onCommit = nil
+        onCancel = nil
+        onControlReleased = nil
+        onTranscriptTimeout = nil
+        textView.delegate = nil
+        textView.isEditable = false
+        window?.makeFirstResponder(nil)
     }
 
     var isReadyForLocalDictation: Bool {

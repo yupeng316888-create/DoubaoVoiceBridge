@@ -100,6 +100,43 @@ enum SelfTests {
         }
 
         do {
+            check(SyntheticControlRoute.localHIDDictation.key(localVoiceKey: .leftControl), .leftControl,
+                  "existing left Control setup remains supported")
+            let source = CGEventSource(stateID: .privateState)
+            source?.keyboardType = 47
+            let shortcuts: [(LocalVoiceKey, CGKeyCode, UInt64)] = [
+                (.fn, 63, CGEventFlags.maskSecondaryFn.rawValue),
+                (.rightCommand, 54, CGEventFlags.maskCommand.rawValue | 0x10)
+            ]
+            for (key, code, flags) in shortcuts {
+                let name = key.rawValue
+                check(SyntheticControlRoute.localHIDDictation.key(localVoiceKey: key), key,
+                      "local dictation uses \(name)")
+                let chordKey = SyntheticControlRoute.remoteHIDPassthrough.key(localVoiceKey: key)
+                check(chordKey, .leftControl, "remote Control chords retain Control under \(name)")
+                guard let down = key.makeEvent(down: true, rightControlHeld: true, voiceSource: source),
+                      let up = key.makeEvent(down: false, rightControlHeld: true, voiceSource: source),
+                      let real = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true),
+                      let chord = chordKey.makeEvent(down: true, rightControlHeld: false, voiceSource: nil) else {
+                    failures.append("Cannot construct \(name) shortcut or passthrough Control")
+                    continue
+                }
+                check(down.flags.rawValue, flags, "bare \(name) down while Control is physically held")
+                check(up.flags.rawValue, 0, "bare \(name) release")
+                for event in [down, up] {
+                    check(event.type, .flagsChanged, "\(name) uses modifier transitions")
+                    check(event.getIntegerValueField(.keyboardEventKeycode), Int64(code), "\(name) native side")
+                    check(event.getIntegerValueField(.keyboardEventKeyboardType), 47, "\(name) uses supplied source on both edges")
+                    check(key.filtersEvent(type: event.type, event: event), true, "marked \(name) stays out of destination")
+                }
+                check(key.filtersEvent(type: real.type, event: real), false, "physical \(name) remains available")
+                check(key.filtersEvent(type: chord.type, event: chord), false, "UU receives Control chords")
+                check(key.makeEvent(down: true, rightControlHeld: false, voiceSource: nil) == nil, true,
+                      "no per-edge replacement source")
+            }
+        }
+
+        do {
             check(
                 SyntheticControlRoute.localHIDDictation.eventTapLocation.rawValue,
                 CGEventTapLocation.cghidEventTap.rawValue,
@@ -287,9 +324,12 @@ enum SelfTests {
         }
 
         failures.append(contentsOf: ClipboardImageReaderTests.run())
+        failures.append(contentsOf: ControlRecoveryTests.run())
+        failures.append(contentsOf: TapOrderRecoveryTests.run())
+        failures.append(contentsOf: HandsFreeShortcutTests.run())
 
         if failures.isEmpty {
-            print("SELF_TEST_OK groups=13 (voice regression + image guards + Finder image files)")
+            print("SELF_TEST_OK (voice including consecutive gestures, tap order and image handling)")
             return true
         }
         for failure in failures {

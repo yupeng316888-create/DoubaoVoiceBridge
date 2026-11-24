@@ -19,6 +19,8 @@ lipo -create \
     "$project_root/.build/arm64-apple-macosx/release/DoubaoVoiceBridge" \
     -output "$stage_app/Contents/MacOS/DoubaoVoiceBridge"
 chmod 755 "$stage_app/Contents/MacOS/DoubaoVoiceBridge"
+# Remove the linker debug map, which contains the builder's absolute paths.
+strip -S "$stage_app/Contents/MacOS/DoubaoVoiceBridge"
 
 codesign --force --sign - \
     --identifier com.lyp.DoubaoVoiceBridge \
